@@ -1,0 +1,302 @@
+"""Overnight subsurface-scene corpus generator: parametric scene -> gprMax B-scan + GT.
+
+Drives ``gpr_agent.sim_scenes`` (build123d CAD -> OCP voxelize -> gprMax HDF5 -> B-scan
+on GPU via GPR-Sim's runtime). Each sample saves the gprMax INPUT (geometry.h5 +
+materials.txt + per-trace t*.in) and OUTPUT (per-trace t*.out + bscan.npy + preview),
+plus a GT ``labels.json`` (every object: kind, material, position, size, eps_r) and a
+``provenance.json`` (params, seed, timestamp, engine). One ``manifest.jsonl`` line per
+sample. Robust by design: each scene is isolated in try/except, failures are logged and
+the loop continues, so it accumulates labeled data unattended.
+
+Scene types (from the subsurface_model_corpus):
+  utility   : single_pipe, duct_bank, utility_trench, protective_concrete
+  ambiguity : tree_roots (root mimics small pipe/void), boulder_field (point diffractor),
+              rebar_mesh (periodic hyperbolas)
+
+Run:
+    python scripts/generate_subsurface_corpus.py [--hours 9] [--max 400] [--seed 0]
+needs PYTHONPATH = GPR-Agent/src;GPR-Sim/src;GPR-KnowledgeBase;GPR-Tools/src
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import time
+import traceback
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+
+from gpr_agent import sim_scenes as S
+
+OUT_ROOT = Path("e:/github/GPR-Sim/data/generated_corpus")
+SOILS = ["dry_sand", "dry_clay", "moist_limestone", "saturated_sand", "wet_clay", "silt", "loam"]
+PIPE_MATS = ["pec", "pvc", "hdpe", "concrete"]
+SCENE_WEIGHTS = {                       # how often each type is drawn
+    "single_pipe": 3, "duct_bank": 2, "utility_trench": 2,
+    "protective_concrete": 2, "tree_roots": 2, "boulder_field": 2, "rebar_mesh": 1,
+}
+
+
+def _eps(mat: str) -> float:
+    try:
+        return float(S.em_spec(mat)["eps_r"])
+    except Exception:
+        return float("nan")
+
+
+def _is_conductor(mat: str) -> bool:
+    return mat.strip().lower() in ("pec", "metal", "steel")
+
+
+def _obj(kind, material, *, x=None, depth=None, radius=None, box=None, ambiguity=False):
+    d = {"kind": kind, "material": material, "eps_r": round(_eps(material), 3),
+         "conductor": _is_conductor(material), "ambiguity": ambiguity}
+    if x is not None:
+        d.update(center_x_m=round(x, 4), depth_m=round(depth, 4), radius_m=round(radius, 4))
+    if box is not None:
+        d["box_m"] = {k: round(v, 4) for k, v in box.items()}
+    return d
+
+
+def _meta(stype, soil, soil_depth, *, fc=8e8, n_traces=40, ambiguity=False, note=""):
+    v = 3e8 / math.sqrt(max(_eps(soil), 1.0))                 # host wave speed (m/s)
+    tw = 2.2 * (soil_depth + 0.12) / v + 3e-9                 # two-way + margin
+    return {"scene_type": stype, "host_material": soil, "host_eps_r": round(_eps(soil), 3),
+            "fc_hz": fc, "n_traces": n_traces, "dx_m": 0.005,
+            "time_window_s": float(min(max(tw, 1.0e-8), 2.2e-8)),
+            "ambiguity": ambiguity, "note": note}
+
+
+# --------------------------------------------------------------------------- #
+# Scene builders -> (Scene, list[label objects], meta)
+# --------------------------------------------------------------------------- #
+def build_single_pipe(rng):
+    soil = rng.choice(SOILS); W = rng.uniform(1.0, 1.4); D = rng.uniform(0.65, 0.9)
+    sc = S.Scene(width_m=W, soil_depth_m=D, dx_m=0.005, soil_material=soil)
+    x = rng.uniform(0.35, W - 0.35); z = rng.uniform(0.20, 0.50); r = rng.uniform(0.03, 0.07)
+    mat = rng.choice(PIPE_MATS)
+    sc.add_pipe(center_x_m=x, depth_m=z, radius_m=r, material=mat)
+    objs = [_obj("pipe", mat, x=x, depth=z, radius=r)]
+    if mat in ("pvc", "hdpe", "concrete") and rng.random() < 0.6:        # empty -> inner air
+        sc.add_void(center_x_m=x, depth_m=z, radius_m=r * 0.7, material="air")
+        objs.append(_obj("pipe_void", "air", x=x, depth=z, radius=r * 0.7))
+    return sc, objs, _meta("single_pipe", soil, D, note=f"{mat} pipe")
+
+
+def build_duct_bank(rng):
+    soil = rng.choice(SOILS); W = rng.uniform(1.2, 1.6); D = rng.uniform(0.7, 0.95)
+    sc = S.Scene(width_m=W, soil_depth_m=D, dx_m=0.005, soil_material=soil)
+    cols = rng.integers(2, 4); rows = rng.integers(1, 3)
+    cw, ch = 0.10, 0.10                                                  # conduit cell
+    bw = cols * cw + 0.06; bh = rows * ch + 0.06
+    cx = rng.uniform(bw / 2 + 0.1, W - bw / 2 - 0.1); top = rng.uniform(0.18, 0.35)
+    sc.add_box(x_min_m=cx - bw / 2, x_max_m=cx + bw / 2, depth_top_m=top,
+               depth_bottom_m=top + bh, material="concrete", name="duct_bank_envelope")
+    objs = [_obj("duct_bank_envelope", "concrete",
+                 box={"x_min": cx - bw / 2, "x_max": cx + bw / 2, "depth_top": top, "depth_bottom": top + bh})]
+    cmat = rng.choice(["pvc", "air"])
+    for i in range(int(cols)):
+        for j in range(int(rows)):
+            ox = cx - bw / 2 + 0.05 + i * cw + cw / 2
+            oz = top + 0.05 + j * ch + ch / 2
+            sc.add_void(center_x_m=ox, depth_m=oz, radius_m=0.03, material=cmat)
+            objs.append(_obj("conduit", cmat, x=ox, depth=oz, radius=0.03))
+    return sc, objs, _meta("duct_bank", soil, D, n_traces=44,
+                           note=f"{cols}x{rows} conduits in concrete")
+
+
+def build_utility_trench(rng):
+    native = rng.choice(["wet_clay", "dry_clay", "moist_limestone"])
+    backfill = rng.choice(["dry_sand", "gravel", "silt"])
+    W = rng.uniform(1.1, 1.5); D = rng.uniform(0.7, 0.95)
+    sc = S.Scene(width_m=W, soil_depth_m=D, dx_m=0.005, soil_material=native)
+    tw_ = rng.uniform(0.35, 0.6); cx = rng.uniform(tw_ / 2 + 0.15, W - tw_ / 2 - 0.15)
+    bottom = rng.uniform(0.5, 0.75)
+    sc.add_box(x_min_m=cx - tw_ / 2, x_max_m=cx + tw_ / 2, depth_top_m=0.0,
+               depth_bottom_m=bottom, material=backfill, name="trench_backfill")
+    objs = [_obj("trench_backfill", backfill,
+                 box={"x_min": cx - tw_ / 2, "x_max": cx + tw_ / 2, "depth_top": 0.0, "depth_bottom": bottom})]
+    if rng.random() < 0.7:                                               # bedded pipe at trench bottom
+        mat = rng.choice(["pvc", "pec", "concrete"]); r = rng.uniform(0.03, 0.06)
+        sc.add_pipe(center_x_m=cx, depth_m=bottom - 0.08, radius_m=r, material=mat)
+        objs.append(_obj("pipe", mat, x=cx, depth=bottom - 0.08, radius=r))
+    return sc, objs, _meta("utility_trench", native, D,
+                           note=f"{backfill} backfill in {native}")
+
+
+def build_protective_concrete(rng):
+    soil = rng.choice(SOILS); W = rng.uniform(1.1, 1.5); D = rng.uniform(0.7, 0.95)
+    sc = S.Scene(width_m=W, soil_depth_m=D, dx_m=0.005, soil_material=soil)
+    slab_top = rng.uniform(0.12, 0.28); slab_h = rng.uniform(0.08, 0.15)
+    sw = rng.uniform(0.6, min(1.0, W - 0.2)); cx = rng.uniform(sw / 2 + 0.1, W - sw / 2 - 0.1)
+    sc.add_box(x_min_m=cx - sw / 2, x_max_m=cx + sw / 2, depth_top_m=slab_top,
+               depth_bottom_m=slab_top + slab_h, material="concrete", name="protective_slab")
+    objs = [_obj("protective_slab", "concrete",
+                 box={"x_min": cx - sw / 2, "x_max": cx + sw / 2, "depth_top": slab_top, "depth_bottom": slab_top + slab_h})]
+    mat = rng.choice(["pec", "pvc", "concrete"]); pz = slab_top + slab_h + rng.uniform(0.12, 0.3)
+    r = rng.uniform(0.04, 0.07)
+    sc.add_pipe(center_x_m=cx + rng.uniform(-0.1, 0.1), depth_m=pz, radius_m=r, material=mat)
+    objs.append(_obj("pipe", mat, x=cx, depth=pz, radius=r))
+    return sc, objs, _meta("protective_concrete", soil, D, note="slab over pipe")
+
+
+def build_tree_roots(rng):
+    soil = rng.choice(["dry_sand", "loam", "silt", "topsoil_moist", "dry_clay"])
+    W = rng.uniform(1.1, 1.5); D = rng.uniform(0.6, 0.85)
+    sc = S.Scene(width_m=W, soil_depth_m=D, dx_m=0.005, soil_material=soil)
+    n = int(rng.integers(3, 8)); objs = []
+    for _ in range(n):
+        x = rng.uniform(0.25, W - 0.25); z = rng.uniform(0.12, 0.45); r = rng.uniform(0.012, 0.03)
+        sc.add_pipe(center_x_m=x, depth_m=z, radius_m=r, material="root")
+        objs.append(_obj("tree_root", "root", x=x, depth=z, radius=r, ambiguity=True))
+    return sc, objs, _meta("tree_roots", soil, D, ambiguity=True,
+                           note=f"{n} roots mimic small pipes/voids")
+
+
+def build_boulder_field(rng):
+    soil = rng.choice(SOILS); W = rng.uniform(1.1, 1.5); D = rng.uniform(0.65, 0.9)
+    sc = S.Scene(width_m=W, soil_depth_m=D, dx_m=0.005, soil_material=soil)
+    n = int(rng.integers(1, 4)); objs = []
+    rock = rng.choice(["granite", "limestone", "moist_limestone"])
+    for _ in range(n):
+        x = rng.uniform(0.25, W - 0.25); z = rng.uniform(0.2, 0.55); r = rng.uniform(0.04, 0.11)
+        sc.add_pipe(center_x_m=x, depth_m=z, radius_m=r, material=rock)
+        objs.append(_obj("boulder", rock, x=x, depth=z, radius=r, ambiguity=True))
+    return sc, objs, _meta("boulder_field", soil, D, ambiguity=True,
+                           note=f"{n} {rock} cobbles -> point diffractors")
+
+
+def build_rebar_mesh(rng):
+    soil = rng.choice(["concrete", "dry_sand", "moist_limestone"])
+    W = rng.uniform(1.0, 1.4); D = rng.uniform(0.5, 0.75)
+    sc = S.Scene(width_m=W, soil_depth_m=D, dx_m=0.005, soil_material=soil)
+    n = int(rng.integers(4, 8)); spacing = (W - 0.3) / (n - 1); z = rng.uniform(0.1, 0.25)
+    objs = []
+    for i in range(n):
+        x = 0.15 + i * spacing
+        sc.add_pipe(center_x_m=x, depth_m=z, radius_m=0.01, material="pec")
+        objs.append(_obj("rebar", "pec", x=x, depth=z, radius=0.01, ambiguity=True))
+    return sc, objs, _meta("rebar_mesh", soil, D, ambiguity=True,
+                           note=f"{n} bars @ {spacing*100:.0f} cm -> periodic hyperbolas")
+
+
+BUILDERS = {
+    "single_pipe": build_single_pipe, "duct_bank": build_duct_bank,
+    "utility_trench": build_utility_trench, "protective_concrete": build_protective_concrete,
+    "tree_roots": build_tree_roots, "boulder_field": build_boulder_field,
+    "rebar_mesh": build_rebar_mesh,
+}
+
+
+def _save_preview(png: Path, bscan: np.ndarray):
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        b = np.asarray(bscan, float)
+        g = b / (np.percentile(np.abs(b), 99, axis=0, keepdims=True) + 1e-12)   # per-trace AGC
+        plt.figure(figsize=(5, 4))
+        plt.imshow(np.clip(g, -1, 1), aspect="auto", cmap="gray")
+        plt.xlabel("trace"); plt.ylabel("sample"); plt.tight_layout()
+        plt.savefig(png, dpi=90); plt.close()
+    except Exception:
+        pass
+
+
+def _clean_caches(out_dir: Path):
+    import shutil
+    for c in ("_cuda_cache", "_pycuda_cache", "_runtime_tmp"):
+        shutil.rmtree(out_dir / c, ignore_errors=True)
+
+
+def run_one(scene_type: str, idx: int, seed: int, log, n_traces_override: int = 0):
+    rng = np.random.default_rng(seed)
+    sc, objs, meta = BUILDERS[scene_type](rng)
+    if n_traces_override:
+        meta["n_traces"] = n_traces_override
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    out_dir = OUT_ROOT / scene_type / f"{scene_type}_{ts}_{idx:05d}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    t0 = time.time()
+    r = S.run_bscan(sc, out_dir=out_dir, fc_hz=meta["fc_hz"], n_traces=meta["n_traces"],
+                    time_window_s=meta["time_window_s"], gpu=True)
+    dt_ns, dx_m, b = r["dt_ns"], r["dx_m"], r["bscan"]
+    _save_preview(out_dir / "bscan.png", b)
+    labels = {
+        "scene_type": scene_type, "ambiguity": meta["ambiguity"], "note": meta["note"],
+        "host_material": meta["host_material"], "host_eps_r": meta["host_eps_r"],
+        "objects": objs,
+        "acquisition": {"fc_hz": meta["fc_hz"], "n_traces": meta["n_traces"], "dx_m": dx_m,
+                        "dt_ns": dt_ns, "time_window_s": meta["time_window_s"],
+                        "scan_width_m": round(dx_m * b.shape[1], 4)},
+        "bscan_shape": list(b.shape), "material_order": r["material_order"],
+    }
+    (out_dir / "labels.json").write_text(json.dumps(labels, indent=2), encoding="utf-8")
+    prov = {
+        "engine": "gpr_agent.sim_scenes (build123d -> OCP voxelize -> gprMax HDF5)",
+        "runtime": "gprMax GPU via subsurface_platform (GPR-Sim) build_gprmax_runtime_environment",
+        "scene_type": scene_type, "seed": seed, "index": idx,
+        "created_at": datetime.now(timezone.utc).isoformat(), "wall_s": round(time.time() - t0, 1),
+        "scene": {"width_m": sc.width_m, "soil_depth_m": sc.soil_depth_m,
+                  "dx_m": sc.dx_m, "soil_material": sc.soil_material},
+        "meta": meta,
+    }
+    (out_dir / "provenance.json").write_text(json.dumps(prov, indent=2), encoding="utf-8")
+    _clean_caches(out_dir)
+    with (OUT_ROOT / "manifest.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"dir": str(out_dir.relative_to(OUT_ROOT)), "scene_type": scene_type,
+                            "ambiguity": meta["ambiguity"], "n_objects": len(objs),
+                            "host": meta["host_material"], "bscan_shape": list(b.shape),
+                            "wall_s": prov["wall_s"], "created_at": prov["created_at"]}) + "\n")
+    log(f"  OK  {scene_type:20s} {b.shape} host={meta['host_material']:14s} "
+        f"objs={len(objs)} {prov['wall_s']:.0f}s -> {out_dir.name}")
+    return out_dir
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--hours", type=float, default=9.0)
+    ap.add_argument("--max", type=int, default=400)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--only", type=str, default="", help="comma list to restrict scene types")
+    ap.add_argument("--n-traces", type=int, default=0, help="override traces/scene (verification)")
+    args = ap.parse_args()
+
+    OUT_ROOT.mkdir(parents=True, exist_ok=True)
+    logf = OUT_ROOT / "generation.log"
+
+    def log(msg):
+        line = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+        print(line, flush=True)
+        with logf.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
+    types = [t for t in (args.only.split(",") if args.only else BUILDERS) if t in BUILDERS]
+    pool = [t for t in types for _ in range(SCENE_WEIGHTS.get(t, 1))]
+    rng = np.random.default_rng(args.seed)
+    deadline = time.time() + args.hours * 3600.0
+    log(f"=== corpus generation start: {len(types)} types, max={args.max}, "
+        f"deadline={args.hours}h, out={OUT_ROOT} ===")
+    n_ok = n_fail = 0
+    idx = 0
+    while time.time() < deadline and n_ok < args.max:
+        scene_type = str(rng.choice(pool))
+        seed = int(rng.integers(0, 2**31 - 1))
+        try:
+            run_one(scene_type, idx, seed, log, n_traces_override=args.n_traces)
+            n_ok += 1
+        except Exception as e:                                          # isolate every scene
+            n_fail += 1
+            log(f"  FAIL {scene_type}: {type(e).__name__}: {str(e)[:200]}")
+            with (OUT_ROOT / "failures.log").open("a", encoding="utf-8") as f:
+                f.write(f"\n=== {scene_type} idx={idx} seed={seed} {datetime.now().isoformat()} ===\n")
+                f.write(traceback.format_exc())
+        idx += 1
+    log(f"=== done: {n_ok} ok, {n_fail} failed, {idx} attempts ===")
+
+
+if __name__ == "__main__":
+    main()

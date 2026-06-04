@@ -59,6 +59,20 @@ def em_spec(material: str) -> dict:
         o = ref.get_object(f"{m}_pipe_empty")
         return {"eps_r": round(0.5 * (o["eps_r_surface_min"] + o["eps_r_surface_max"]), 3),
                 "sigma": 0.0, "mu_r": 1.0, "sigma_star": 0.0}
+    # Common construction / natural dielectrics the KB material DB does not carry yet.
+    # Representative mid-range (eps_r, sigma S/m) at GPR frequencies (Daniels 2004;
+    # Cassidy 2009; Annan 2005). SIMULATION inputs (physical properties, not GT-fit);
+    # migrate into gpr_kb.reference when the KB gains construction materials.
+    _LIT = {
+        "concrete": (6.5, 0.02), "concrete_dry": (5.5, 0.01), "concrete_moist": (8.5, 0.04),
+        "gravel": (5.0, 0.001), "wet_clay": (22.0, 0.05), "wet_sand": (22.0, 0.01),
+        "silt": (12.0, 0.02), "loam": (12.0, 0.02), "asphalt": (5.0, 0.001),
+        "brick": (4.0, 0.005), "wood": (6.0, 0.002), "root": (15.0, 0.012),
+        "limestone": (7.0, 0.001), "granite": (5.5, 0.0005),
+    }
+    if m in _LIT:
+        eps, sig = _LIT[m]
+        return {"eps_r": eps, "sigma": sig, "mu_r": 1.0, "sigma_star": 0.0}
     raise ValueError(f"unknown material {material!r}")
 
 
@@ -104,6 +118,15 @@ class Scene:
     def add_layer(self, *, depth_top_m: float, thickness_m: float, material: str):
         y1 = self.soil_depth_m - depth_top_m
         self.objects.append(_Obj(self._solid_box(0, y1 - thickness_m, self.width_m, y1), material, f"{material}_layer"))
+        return self
+
+    def add_box(self, *, x_min_m: float, x_max_m: float, depth_top_m: float,
+                depth_bottom_m: float, material: str, name: str | None = None):
+        """A localized axis-aligned box (duct-bank envelope, trench backfill, slab/cap)."""
+        y_top = self.soil_depth_m - depth_top_m          # shallower -> larger y
+        y_bot = self.soil_depth_m - depth_bottom_m       # deeper    -> smaller y
+        self.objects.append(_Obj(self._solid_box(x_min_m, y_bot, x_max_m, y_top),
+                                 material, name or f"{material}_box"))
         return self
 
     # ---- voxelize via OCP point-in-solid ----
