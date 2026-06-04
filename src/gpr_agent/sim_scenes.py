@@ -97,6 +97,10 @@ class Scene:
     air_gap_m: float = 0.08
     dx_m: float = 0.003
     soil_material: str = "moist_limestone"
+    # Heterogeneous soil: None = homogeneous; else a dict
+    # {eps_spread_frac, correlation_length_m, n_levels, seed} -> a correlated random eps_r
+    # field baked into the soil background (realistic small-scale clutter).
+    soil_heterogeneity: dict | None = None
     objects: list = field(default_factory=list)   # painted in order; later overrides earlier
 
     def _solid_box(self, x0, y0, x1, y1):
@@ -146,6 +150,7 @@ class Scene:
         # material registry: 0=air background (above surface), 1=soil, then objects
         order = ["air", self.soil_material]
         idx_of = {"air": 0, self.soil_material: 1}
+        self._mat_overrides: dict = {}                      # synthetic soil-variant eps/sigma
         vol = np.zeros((nx, ny, 1), dtype=np.int32)
         vol[:, :surf_j, 0] = 1                              # soil fills below the surface
 
@@ -164,7 +169,40 @@ class Scene:
                     cls.Perform(gp_Pnt(xc, yc, 0.0), 1e-9)
                     if cls.State() in (TopAbs_IN, TopAbs_ON):
                         vol[i, j, 0] = mi
+
+        if self.soil_heterogeneity:                        # bake a correlated eps_r field into the soil
+            self._apply_soil_heterogeneity(vol, order, surf_j)
         return vol, order
+
+    def _apply_soil_heterogeneity(self, vol, order, surf_j):
+        """Replace the homogeneous soil background with a correlated random field of
+        soil variants (small-scale eps_r/sigma perturbations) -> realistic GPR clutter.
+        Object cells (already painted) are untouched; only cells still == 1 (soil) vary."""
+        from scipy.ndimage import gaussian_filter
+        het = self.soil_heterogeneity
+        nx, ny, _ = vol.shape
+        rng = np.random.default_rng(int(het.get("seed", 0)))
+        n = max(2, int(het.get("n_levels", 9)))
+        spread = float(het.get("eps_spread_frac", 0.12))
+        sigma_cells = max(1.0, float(het.get("correlation_length_m", 0.10)) / self.dx_m)
+        field = gaussian_filter(rng.standard_normal((nx, ny)), sigma_cells)
+        sd = field.std() or 1.0
+        field = np.clip(field / (3.0 * sd), -1.0, 1.0)     # ~[-1, 1]
+        lvl = np.clip(((field + 1.0) / 2.0 * n).astype(int), 0, n - 1)   # (nx, ny) level
+
+        base = em_spec(self.soil_material)
+        base_eps = float(base["eps_r"])
+        base_sig = 0.0 if str(base["sigma"]).lower() == "inf" else float(base["sigma"])
+        v2 = vol[:, :, 0]
+        soil_mask = v2 == 1
+        var_idx = [1] + [len(order) + k - 1 for k in range(1, n)]        # level 0 reuses idx 1
+        for k in range(1, n):
+            order.append(f"{self.soil_material}#h{k}")
+        for k in range(n):
+            mult = 1.0 + spread * (2.0 * k / (n - 1) - 1.0)             # eps multiplier per level
+            v2[soil_mask & (lvl == k)] = var_idx[k]
+            self._mat_overrides[order[var_idx[k]]] = (
+                round(base_eps * mult, 3), round(base_sig * mult, 6), 1.0, 0.0)
 
     # ---- write gprMax geometry package ----
     def write_gprmax(self, out_dir: Path):
@@ -176,10 +214,15 @@ class Scene:
             f.attrs["dx_dy_dz"] = (self.dx_m, self.dx_m, self.dx_m)
             f.create_dataset("/data", data=vol)            # material indices, 0..len(order)-1
         mats = out_dir / "materials.txt"
+        overrides = getattr(self, "_mat_overrides", {})
         lines = []
         for name in order:                                 # line order == index
-            s = em_spec(name)
-            lines.append(f"#material: {_fmt(s['eps_r'])} {_fmt(s['sigma'])} {_fmt(s['mu_r'])} {_fmt(s['sigma_star'])} {name}")
+            if name in overrides:                          # synthetic soil variant (heterogeneity)
+                eps, sig, mu, ss = overrides[name]
+            else:
+                s = em_spec(name)
+                eps, sig, mu, ss = s["eps_r"], s["sigma"], s["mu_r"], s["sigma_star"]
+            lines.append(f"#material: {_fmt(eps)} {_fmt(sig)} {_fmt(mu)} {_fmt(ss)} {name}")
         mats.write_text("\n".join(lines) + "\n", encoding="utf-8")
         (out_dir / "scene.json").write_text(json.dumps({
             "width_m": self.width_m, "soil_depth_m": self.soil_depth_m, "dx_m": self.dx_m,

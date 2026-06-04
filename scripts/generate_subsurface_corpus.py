@@ -212,25 +212,42 @@ def _clean_caches(out_dir: Path):
         shutil.rmtree(out_dir / c, ignore_errors=True)
 
 
+# Scan trajectory: the survey line runs ALONG the scene width. The antenna steps from
+# `SCAN_MARGIN_M` to `width - SCAN_MARGIN_M` at a fixed trace spacing, so every object
+# (placed within [0.25, width-0.25]) is imaged -- not the old fixed [0.10, 0.49] window.
+SCAN_MARGIN_M = 0.10
+SCAN_STEP_M = 0.02            # trace spacing (good lateral hyperbola sampling at 800 MHz)
+
+
 def run_one(scene_type: str, idx: int, seed: int, log, n_traces_override: int = 0):
     rng = np.random.default_rng(seed)
     sc, objs, meta = BUILDERS[scene_type](rng)
-    if n_traces_override:
-        meta["n_traces"] = n_traces_override
+    # Heterogeneous background soil: a correlated random eps_r field (realistic clutter).
+    het = {"eps_spread_frac": 0.12, "correlation_length_m": float(rng.uniform(0.06, 0.15)),
+           "n_levels": 9, "seed": seed}
+    sc.soil_heterogeneity = het
+    span = max(sc.width_m - 2 * SCAN_MARGIN_M, SCAN_STEP_M)
+    n_traces = n_traces_override or max(24, int(round(span / SCAN_STEP_M)) + 1)
+    meta["n_traces"] = n_traces
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     out_dir = OUT_ROOT / scene_type / f"{scene_type}_{ts}_{idx:05d}"
     out_dir.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
-    r = S.run_bscan(sc, out_dir=out_dir, fc_hz=meta["fc_hz"], n_traces=meta["n_traces"],
+    r = S.run_bscan(sc, out_dir=out_dir, fc_hz=meta["fc_hz"], n_traces=n_traces,
+                    scan_start_m=SCAN_MARGIN_M, scan_step_m=SCAN_STEP_M,
                     time_window_s=meta["time_window_s"], gpu=True)
     dt_ns, dx_m, b = r["dt_ns"], r["dx_m"], r["bscan"]
     _save_preview(out_dir / "bscan.png", b)
     labels = {
         "scene_type": scene_type, "ambiguity": meta["ambiguity"], "note": meta["note"],
         "host_material": meta["host_material"], "host_eps_r": meta["host_eps_r"],
+        "soil_heterogeneity": het,
         "objects": objs,
         "acquisition": {"fc_hz": meta["fc_hz"], "n_traces": meta["n_traces"], "dx_m": dx_m,
                         "dt_ns": dt_ns, "time_window_s": meta["time_window_s"],
+                        "scan_start_m": SCAN_MARGIN_M, "scan_step_m": SCAN_STEP_M,
+                        "scan_extent_m": [SCAN_MARGIN_M, round(SCAN_MARGIN_M + (b.shape[1] - 1) * dx_m, 4)],
+                        "scene_width_m": sc.width_m,
                         "scan_width_m": round(dx_m * b.shape[1], 4)},
         "bscan_shape": list(b.shape), "material_order": r["material_order"],
     }
