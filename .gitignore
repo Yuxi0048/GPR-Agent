@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+# run outputs / artifacts (regenerated; not source)
+_artifacts/
+out/
+*.png
+*.h5
+*.out
+*.vti
+*.npy
+*.npz
+# local env
+.env
+.DS_Store

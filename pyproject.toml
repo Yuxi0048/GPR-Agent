@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpr-agent"
+version = "0.1.0"
+description = "Agentic GPR interpretation — a 4-agent workflow (A1 imaging → A2 radargram ‖ A3 subsurface → A4 leader) over the GPR platform libraries, with a keyless deterministic oracle and an NL-instructed FDTD simulation path."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "BSD-3-Clause" }
+authors = [{ name = "Yuxi Zhang", email = "yuxizhang0048@gmail.com" }]
+keywords = ["gpr", "agent", "interpretation", "vlm", "fdtd", "simulation"]
+dependencies = [
+  "numpy>=1.26",
+  "scipy>=1.10",
+  "pydantic>=2.7",
+  # Platform libraries (resolved via editable installs or the GPR_TOOLS_SRC /
+  # PYTHONPATH path-shims until pinned/published — same convention as GPR-Bench):
+  #   gpr-data-processing  (GPR-Tools, L1)  — perception engine
+  #   gpr-kb               (GPR-KB,   L0)   — reference library (materials/taxonomy)
+  #   gpr-bench            (GPR-Bench, L2)  — scoring the case vs ground truth
+  # "gpr-data-processing>=0.1",
+  # "gpr-kb>=0.1",
+  # "gpr-bench>=0.1",
+]
+
+[project.optional-dependencies]
+# The VLM agents (A1–A4 in Pydantic-AI). The keyless deterministic oracle needs none of this.
+vlm = ["pydantic-ai>=0.0.14"]
+# NL-instructed simulation: parametric scene → build123d CAD → gprMax FDTD B-scan.
+# gprMax + a CUDA toolchain are provided through GPR-Sim's runtime environment, not pip.
+sim = ["build123d>=0.5", "ocp-tessellate>=2.0"]
+viz = ["matplotlib>=3.7"]
+dev = ["pytest>=7.4"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["gpr_agent*"]
+
+[tool.setuptools.package-data]
+"gpr_agent" = ["prompts/*.md", "README.md"]
