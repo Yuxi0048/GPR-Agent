@@ -92,7 +92,13 @@ def _ids_by_type(feats: list[SyntheticFeature], ft: str) -> list[str]:
 
 
 def relations_for_scene(scene_type: str, feats: list[SyntheticFeature]) -> list[tuple]:
-    """Per-archetype structural relations (the spatial/construction binding -> composite)."""
+    """Structural relations derived from the features PRESENT (generic -> also handles freeform).
+
+    Whatever feature combos exist bind into the standard civil relations: a pipe inside a trench, a
+    cap resurfacing a trench, a slab above a pipe, conduits within a duct envelope. A lone feature
+    (single pipe, boulder field, rebar mat) yields no relation -> simple. ``scene_type`` is accepted
+    for signature stability but the derivation is content-driven.
+    """
     rels: list[tuple] = []
     trench = _ids_by_type(feats, "trench")
     caps = _ids_by_type(feats, "topsoil_cap")
@@ -100,19 +106,17 @@ def relations_for_scene(scene_type: str, feats: list[SyntheticFeature]) -> list[
     slabs = _ids_by_type(feats, "slab")
     envelopes = _ids_by_type(feats, "duct_envelope")
     conduits = _ids_by_type(feats, "conduit")
-    if scene_type == "utility_trench" and trench:
+    if trench:
         for p in pipes:                                          # bedded pipe inside the trench
             rels.append((p, ScenarioRelationType.SPATIAL_CONTAINED_IN, trench[0]))
         for c in caps:                                           # resurfaced trench cap
             rels.append((c, ScenarioRelationType.CONSTRUCTION_RESURFACED_AFTER, trench[0]))
-    elif scene_type == "protective_concrete":
-        for s in slabs:
-            for p in pipes:                                      # slab protecting/over the pipe
-                rels.append((s, ScenarioRelationType.SPATIAL_ABOVE, p))
-    elif scene_type == "duct_bank" and envelopes:
+    for s in slabs:
+        for p in pipes:                                          # slab protecting/over the pipe
+            rels.append((s, ScenarioRelationType.SPATIAL_ABOVE, p))
+    if envelopes:
         for c in conduits:                                       # conduits within the envelope
             rels.append((c, ScenarioRelationType.SPATIAL_CONTAINED_IN, envelopes[0]))
-    # single_pipe / tree_roots / boulder_field / rebar_mesh -> no structural relation (simple)
     return rels
 
 
@@ -126,11 +130,15 @@ def host_profile_from_soil(soil: str) -> HostProfile:
 
 
 def build_card_for_scene(*, card_id: str, scene_type: str, soil: str, objs: list[dict],
-                         coupling: str | None, note: str):
-    """Assemble the domain-native SimulationCard (+ primitives) for one generated scene."""
+                         coupling: str | None, note: str, host_profile: HostProfile | None = None):
+    """Assemble the domain-native SimulationCard (+ primitives) for one generated scene.
+
+    ``host_profile`` overrides the default single-soil host (e.g. a civil HostProfile resolved from
+    NL in Tier-F); when omitted the corpus soil is wrapped as a bare_soil profile.
+    """
     feats = features_from_objs(objs)
     rels = relations_for_scene(scene_type, feats)
-    host = host_profile_from_soil(soil)
+    host = host_profile or host_profile_from_soil(soil)
     acq = AcquisitionPriors(coupling=coupling) if coupling else AcquisitionPriors(coupling=host.default_coupling)
     summary = f"{scene_type} in {soil}: " + ", ".join(f.feature_type for f in feats)
     card, prims = build_simulation_card(

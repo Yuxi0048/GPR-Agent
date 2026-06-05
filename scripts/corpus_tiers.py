@@ -34,6 +34,8 @@ sys.path[:0] = [str(_HERE), r"e:/github/GPR-Agent/src", r"e:/github/GPR-Sim/src"
 
 import gpr_agent.sim_scenes as S
 from generate_subsurface_corpus import BUILDERS, _eps, _is_conductor, _obj  # Tier-T templates
+import corpus_domain as CD                                                   # domain-native bridge
+from subsurface_platform.domain import HostContext, default_host_profile, resolve_host_context
 
 DATA = Path("e:/github/GPR-Sim/data")
 CORPUS = DATA / "generated_corpus"
@@ -48,6 +50,14 @@ def _now() -> str:
 # --------------------------------------------------------------------------- #
 # Tier T — the trusted template registry
 # --------------------------------------------------------------------------- #
+# Composition of each native archetype (the trench/duct/protective archetypes are composite -- they
+# bind features by a spatial/construction relation; the rest are simple).
+NATIVE_COMPOSITION = {
+    "single_pipe": "simple", "tree_roots": "simple", "boulder_field": "simple", "rebar_mesh": "simple",
+    "utility_trench": "composite", "duct_bank": "composite", "protective_concrete": "composite",
+}
+
+
 def write_registry() -> Path:
     """Snapshot the trusted BUILDERS into registry.json with provenance."""
     REGISTRY.parent.mkdir(parents=True, exist_ok=True)
@@ -61,6 +71,8 @@ def write_registry() -> Path:
             "name": name,
             "origin": prev.get("origin", "native"),         # native | promoted_from_freeform:<id>
             "version": prev.get("version", 1),
+            "composition": prev.get("composition", NATIVE_COMPOSITION.get(name)),
+            "host_context": prev.get("host_context", "bare_soil"),
             "reviewed_by": prev.get("reviewed_by", "design"),
             "reviewed_at": prev.get("reviewed_at", _now()),
         })
@@ -69,12 +81,14 @@ def write_registry() -> Path:
     return REGISTRY
 
 
-def register_template(name: str, *, origin: str, reviewed_by: str) -> None:
+def register_template(name: str, *, origin: str, reviewed_by: str,
+                      composition: str | None = None, host_context: str | None = None) -> None:
     """Add/replace a template entry (used by promotion)."""
     write_registry()
     reg = json.loads(REGISTRY.read_text())
     reg["templates"] = [t for t in reg["templates"] if t["name"] != name]
     reg["templates"].append({"name": name, "origin": origin, "version": 1,
+                             "composition": composition, "host_context": host_context,
                              "reviewed_by": reviewed_by, "reviewed_at": _now()})
     reg["updated_at"] = _now()
     REGISTRY.write_text(json.dumps(reg, indent=2), encoding="utf-8")
@@ -102,20 +116,46 @@ def _num(pat: str, text: str, default=None):
     return float(m.group(1)) if m else default
 
 
+def _apply_host_profile(sc, profile, rng) -> str:
+    """Paint a civil HostProfile onto a Scene (surface->down) and return the background material.
+
+    Finite horizons become add_layer slabs (top to bottom); the background (the half-space material,
+    else the deepest finite layer) is set as soil_material. Targets added later paint over the layers.
+    """
+    finite = [h for h in profile.layers if not h.is_half_space]
+    half = next((h for h in profile.layers if h.is_half_space), None)
+    background = half.material if half is not None else (finite[-1].material if finite else "loam")
+    sc.soil_material = background
+    depth = 0.0
+    for h in finite:
+        t = float(h.sample_thickness_m(rng) or 0.05)
+        sc.add_layer(depth_top_m=round(depth, 4), thickness_m=round(t, 4), material=h.material)
+        depth += t
+    return background
+
+
 def freeform_to_scene(description: str, rng):
     """Lightweight NL -> Scene. Returns (scene, label_objects, parse_report).
 
-    Production seam: replace this with
-    ``subsurface_platform.extraction.CompositeExtractor`` for richer extraction.
+    The host is resolved as a civil HostContext (resolve_host_context -- the stable NL mechanism):
+    a recognized context (asphalt road, bridge deck, grass field, ...) paints its layered profile;
+    otherwise a single soil keyword is used (bare_soil). Production seam for the discrete targets:
+    ``subsurface_platform.extraction.CompositeExtractor``.
     """
     text = " " + description.lower().strip() + " "
-    host = next((h for h in _HOSTS if h.replace("_", " ") in text or h in text), "dry_sand")
     W = float(_num(r"width\s*=?\s*([0-9.]+)", text, 1.3))
     D = float(_num(r"depth\s*(?:of\s*)?(?:domain|soil)?\s*=?\s*([0-9.]+)", text, 0.9))
-    sc = S.Scene(width_m=W, soil_depth_m=D, dx_m=0.005, soil_material=host)
+    sc = S.Scene(width_m=W, soil_depth_m=D, dx_m=0.005, soil_material="loam")
     sc.soil_heterogeneity = {"eps_spread_frac": 0.10, "correlation_length_m": 0.10,
                              "n_levels": 9, "seed": int(rng.integers(0, 2**31 - 1))}
-    objs, report = [], {"host": host, "width_m": W, "depth_m": D, "parsed": [], "unparsed": []}
+    ctx = resolve_host_context(description)
+    if ctx is not HostContext.BARE_SOIL:                       # civil context -> layered profile
+        host = _apply_host_profile(sc, default_host_profile(ctx), rng)
+    else:                                                      # bare soil -> single soil keyword
+        host = next((h for h in _HOSTS if h.replace("_", " ") in text or h in text), "dry_sand")
+        sc.soil_material = host
+    objs, report = [], {"host": host, "host_context": ctx.value, "width_m": W, "depth_m": D,
+                        "parsed": [], "unparsed": []}
 
     # trench (box | trapezoid | v_shape) + optional topsoil cap
     if "trench" in text:
@@ -246,33 +286,60 @@ def propose_freeform(description: str, *, seed: int = 0) -> Path:
     (d / "scene.json").write_text(json.dumps(
         {"description": description, "seed": seed, "host": sc.soil_material,
          "width_m": sc.width_m, "soil_depth_m": sc.soil_depth_m, "parse_report": report}, indent=2), encoding="utf-8")
-    (d / "labels.json").write_text(json.dumps({"objects": objs, "host_material": sc.soil_material}, indent=2), encoding="utf-8")
+    (d / "labels.json").write_text(json.dumps({"objects": objs, "host_material": sc.soil_material,
+                                               "host_context": report["host_context"]}, indent=2), encoding="utf-8")
     (d / "gate_a.json").write_text(json.dumps(ga, indent=2), encoding="utf-8")
+    # Domain-native proposal card: resolve the civil HostProfile from the NL context (Phase 5) and
+    # lift the parsed scene into a SimulationCard (features + relations + composition) -- so a Tier-F
+    # proposal is reviewed (and promoted) in the same model as the trusted Tier-T scenes.
+    ctx = HostContext(report["host_context"])
+    host_profile = default_host_profile(ctx)
+    composition = None
+    try:
+        card, _ = CD.build_card_for_scene(card_id=pid, scene_type="freeform", soil=sc.soil_material,
+                                          objs=objs, coupling=host_profile.default_coupling,
+                                          note=f"freeform proposal: {description[:160]}",
+                                          host_profile=host_profile)
+        (d / "card.json").write_text(card.to_json(), encoding="utf-8")
+        composition = card.scene_composition.value
+    except Exception as e:                                             # best-effort
+        (d / "card_error.txt").write_text(str(e), encoding="utf-8")
     try:
         _eps_map_png(sc, d / "model.png")
         _radargram_png(sc, d / "radargram.png")
     except Exception as e:                                             # preview is best-effort
         (d / "preview_error.txt").write_text(str(e), encoding="utf-8")
     review = {"proposal_id": pid, "status": "pending", "reviewer": None, "reviewed_at": None,
-              "gate_a_ok": ga["ok"], "checks": {}, "notes": "", "promotion": None}
+              "gate_a_ok": ga["ok"], "host_context": ctx.value, "scene_composition": composition,
+              "checks": {}, "notes": "", "promotion": None}
     (d / "review.json").write_text(json.dumps(review, indent=2), encoding="utf-8")
     PROPOSALS.mkdir(parents=True, exist_ok=True)
     with (PROPOSALS / "proposals_manifest.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps({"proposal_id": pid, "status": "pending", "gate_a_ok": ga["ok"],
                             "n_objects": len(objs), "host": sc.soil_material,
+                            "host_context": ctx.value, "scene_composition": composition,
                             "description": description, "created_at": _now()}) + "\n")
-    print(f"PROPOSED {pid}  gate_a_ok={ga['ok']}  objs={len(objs)}  parsed={report['parsed']}"
+    print(f"PROPOSED {pid}  gate_a_ok={ga['ok']}  host_context={ctx.value}  composition={composition}"
+          f"  objs={len(objs)}  parsed={report['parsed']}"
           + (f"  UNPARSED={report['unparsed']}" if report["unparsed"] else ""))
-    print(f"  review bundle: {d}  (model.png, radargram.png, labels.json, gate_a.json)")
+    print(f"  review bundle: {d}  (model.png, radargram.png, card.json, labels.json, gate_a.json)")
     return d
 
 
-def _scaffold_template(pid: str, labels: dict, scene_meta: dict) -> Path:
-    """Promotion: emit a parametric build_<name>(rng) stub from the reviewed candidate."""
+def _scaffold_template(pid: str, labels: dict, scene_meta: dict,
+                       composition: str | None = None, host_context: str | None = None) -> Path:
+    """Promotion: emit a parametric build_<name>(rng) stub from the reviewed candidate.
+
+    The scaffold reproduces the candidate's objects; the structural RELATIONS are not hardcoded --
+    corpus_domain.relations_for_scene re-derives them from the features at card-build time, so a
+    promoted template stays consistent with the bridge. composition/host_context are recorded in the
+    registry for stratification.
+    """
     name = f"promoted_{pid.split('_')[1]}"
     out = _HERE / "promoted_templates"; out.mkdir(parents=True, exist_ok=True)
     lines = [f'"""Promoted from freeform proposal {pid} (human-reviewed). Finalize the parameter',
-             '   ranges (rng.uniform/choice) then register in the Tier-T registry."""',
+             f'   ranges (rng.uniform/choice) then register in the Tier-T registry.',
+             f'   composition={composition}  host_context={host_context}  (relations auto-derived)."""',
              "import gpr_agent.sim_scenes as S",
              "from generate_subsurface_corpus import _obj, _meta", "",
              f"def build_{name}(rng):",
@@ -294,7 +361,8 @@ def _scaffold_template(pid: str, labels: dict, scene_meta: dict) -> Path:
     lines += [f"    return sc, objs, _meta('{name}', {scene_meta['host']!r}, {scene_meta['soil_depth_m']:.3f},"
               f" note='promoted from {pid}')", ""]
     p = out / f"build_{name}.py"; p.write_text("\n".join(lines), encoding="utf-8")
-    register_template(name, origin=f"promoted_from_freeform:{pid}", reviewed_by="review_cli")
+    register_template(name, origin=f"promoted_from_freeform:{pid}", reviewed_by="review_cli",
+                      composition=composition, host_context=host_context)
     return p
 
 
@@ -308,7 +376,8 @@ def review(proposal_id: str, decision: str, *, reviewer: str = "human", notes: s
         labels = json.loads((d / "labels.json").read_text())
         meta = json.loads((d / "scene.json").read_text())
         scaffold = _scaffold_template(proposal_id, labels,
-                                      {"width_m": meta["width_m"], "soil_depth_m": meta["soil_depth_m"], "host": meta["host"]})
+                                      {"width_m": meta["width_m"], "soil_depth_m": meta["soil_depth_m"], "host": meta["host"]},
+                                      composition=rv.get("scene_composition"), host_context=rv.get("host_context"))
         rv["promotion"] = {"template_scaffold": str(scaffold)}
         print(f"PROMOTED {proposal_id} -> {scaffold}  (finalize ranges, then it joins Tier T)")
     elif decision == "accept_sample":
@@ -328,7 +397,9 @@ def list_proposals() -> None:
         r = json.loads(line)
         d = PROPOSALS / r["proposal_id"]
         st = json.loads((d / "review.json").read_text())["status"] if (d / "review.json").exists() else r["status"]
-        print(f"  {r['proposal_id']:28} {st:16} gateA={r['gate_a_ok']!s:5} objs={r['n_objects']}  \"{r['description'][:50]}\"")
+        print(f"  {r['proposal_id']:28} {st:12} gateA={r['gate_a_ok']!s:5} "
+              f"{r.get('host_context','?'):16} {str(r.get('scene_composition')):9} objs={r['n_objects']}  "
+              f"\"{r['description'][:42]}\"")
 
 
 def main():
