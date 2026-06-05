@@ -214,6 +214,33 @@ BUILDERS = {
 }
 
 
+def load_promoted_builders() -> dict:
+    """Tier-T promoted templates: discover build_*.py in promoted_templates/ (origin=
+    promoted_from_freeform). These graduated from a human-reviewed freeform proposal via
+    corpus_tiers.py. See docs/corpus-two-tier-design.md. Best-effort: a broken stub is skipped."""
+    import importlib.util
+    out: dict = {}
+    pdir = Path(__file__).resolve().parent / "promoted_templates"
+    if not pdir.exists():
+        return out
+    for f in sorted(pdir.glob("build_*.py")):
+        try:
+            spec = importlib.util.spec_from_file_location(f.stem, f)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)              # type: ignore[union-attr]
+            fn = getattr(mod, f.stem, None)           # build_<name>
+            if callable(fn):
+                out[f.stem[len("build_"):]] = fn
+        except Exception:
+            continue
+    return out
+
+
+def all_builders() -> dict:
+    """The live Tier-T set: natives + finalized promoted templates."""
+    return {**BUILDERS, **load_promoted_builders()}
+
+
 def _save_preview(png: Path, bscan: np.ndarray):
     try:
         import matplotlib
@@ -244,7 +271,7 @@ SCAN_STEP_M = 0.02            # trace spacing (good lateral hyperbola sampling a
 
 def run_one(scene_type: str, idx: int, seed: int, log, n_traces_override: int = 0):
     rng = np.random.default_rng(seed)
-    sc, objs, meta = BUILDERS[scene_type](rng)
+    sc, objs, meta = all_builders()[scene_type](rng)
     # Heterogeneous background soil: a correlated random eps_r field (realistic clutter).
     het = {"eps_spread_frac": 0.12, "correlation_length_m": float(rng.uniform(0.06, 0.15)),
            "n_levels": 9, "seed": seed}
@@ -314,7 +341,8 @@ def main():
         with logf.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
 
-    types = [t for t in (args.only.split(",") if args.only else BUILDERS) if t in BUILDERS]
+    _live = all_builders()                                  # natives + promoted (Tier T)
+    types = [t for t in (args.only.split(",") if args.only else _live) if t in _live]
     pool = [t for t in types for _ in range(SCENE_WEIGHTS.get(t, 1))]
     rng = np.random.default_rng(args.seed)
     deadline = time.time() + args.hours * 3600.0
