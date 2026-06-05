@@ -30,7 +30,8 @@ import numpy as np
 
 _HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(_HERE), r"e:/github/GPR-Agent/src", r"e:/github/GPR-Sim/src",
-                r"e:/github/GPR-KnowledgeBase", r"e:/github/GPR-Tools/src"]
+                r"e:/github/GPR-KnowledgeBase", r"e:/github/GPR-Tools/src",
+                r"e:/github/GPR-Interpretation/src"]   # gpr_reasoning (pulled in by import gpr_agent)
 
 import gpr_agent.sim_scenes as S
 from generate_subsurface_corpus import BUILDERS, _eps, _is_conductor, _obj  # Tier-T templates
