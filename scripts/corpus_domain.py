@@ -29,6 +29,7 @@ from subsurface_platform.domain.primitive_geometry import (    # noqa: E402
 )
 from subsurface_platform.domain.acquisition_priors import AcquisitionPriors  # noqa: E402
 from subsurface_platform.domain.scenario_relation import ScenarioRelationType  # noqa: E402
+from subsurface_platform.domain.site_conditions import SiteConditions, SoilTexture  # noqa: E402
 from subsurface_platform.synthetic import SyntheticFeature, build_simulation_card  # noqa: E402
 
 _Y = 0.20  # nominal cross-survey extent (m) for geometry metadata (the corpus is a 2-D x-z profile)
@@ -129,21 +130,39 @@ def host_profile_from_soil(soil: str) -> HostProfile:
                        standard_refs=["USCS ASTM D2487"])
 
 
+# Corpus soil id -> Dutch SoilTexture class (Ground condition), for SiteConditions.
+_SOIL_TEXTURE = {
+    "dry_sand": SoilTexture.SANDY, "saturated_sand": SoilTexture.SANDY,
+    "wet_clay": SoilTexture.CLAYEY, "dry_clay": SoilTexture.CLAYEY,
+    "silt": SoilTexture.SILTY, "loam": SoilTexture.LOAMY, "topsoil_moist": SoilTexture.LOAMY,
+    "moist_limestone": None,
+}
+
+
+def site_conditions_from_soil(soil: str) -> SiteConditions:
+    """Minimal SiteConditions inferred from the corpus host soil (texture only; anomalies/groundwater
+    are scene-generation options added separately)."""
+    return SiteConditions(soil_texture=_SOIL_TEXTURE.get(soil))
+
+
 def build_card_for_scene(*, card_id: str, scene_type: str, soil: str, objs: list[dict],
-                         coupling: str | None, note: str, host_profile: HostProfile | None = None):
+                         coupling: str | None, note: str, host_profile: HostProfile | None = None,
+                         site_conditions: SiteConditions | None = None):
     """Assemble the domain-native SimulationCard (+ primitives) for one generated scene.
 
     ``host_profile`` overrides the default single-soil host (e.g. a civil HostProfile resolved from
     NL in Tier-F); when omitted the corpus soil is wrapped as a bare_soil profile.
+    ``site_conditions`` defaults to texture inferred from the soil.
     """
     feats = features_from_objs(objs)
     rels = relations_for_scene(scene_type, feats)
     host = host_profile or host_profile_from_soil(soil)
+    site_conditions = site_conditions or site_conditions_from_soil(soil)
     acq = AcquisitionPriors(coupling=coupling) if coupling else AcquisitionPriors(coupling=host.default_coupling)
     summary = f"{scene_type} in {soil}: " + ", ".join(f.feature_type for f in feats)
     card, prims = build_simulation_card(
         card_id=card_id, host_profile=host, features=feats, relations=rels,
-        acquisition_priors=acq, summary=summary[:300],
+        acquisition_priors=acq, site_conditions=site_conditions, summary=summary[:300],
         tested_claim=f"A {scene_type} scene produces its characteristic GPR signature.",
         narrative=note or summary[:300])
     return card, prims

@@ -33,7 +33,7 @@ from gpr_agent import sim_scenes as S
 
 OUT_ROOT = Path("e:/github/GPR-Sim/data/generated_corpus")
 SOILS = ["dry_sand", "dry_clay", "moist_limestone", "saturated_sand", "wet_clay", "silt", "loam"]
-PIPE_MATS = ["pec", "pvc", "hdpe", "concrete"]
+PIPE_MATS = ["steel", "cast_iron", "pvc", "hdpe", "concrete"]   # real names; em_spec maps metals->PEC
 SCENE_WEIGHTS = {                       # how often each type is drawn
     "single_pipe": 3, "duct_bank": 2, "utility_trench": 2,
     "protective_concrete": 2, "tree_roots": 2, "boulder_field": 2, "rebar_mesh": 1,
@@ -80,7 +80,8 @@ def _eps(mat: str) -> float:
 
 
 def _is_conductor(mat: str) -> bool:
-    return mat.strip().lower() in ("pec", "metal", "steel")
+    return mat.strip().lower() in ("pec", "metal", "steel", "cast_iron", "lead",
+                                   "paper_insulated_lead_covered", "pilc")
 
 
 def _obj(kind, material, *, x=None, depth=None, radius=None, box=None, polygon=None, ambiguity=False):
@@ -169,7 +170,7 @@ def build_utility_trench(rng):
         objs = [_obj("trench_backfill", backfill, polygon=corners,
                      box={"x_min": cx - htop, "x_max": cx + htop, "depth_top": 0.0, "depth_bottom": bottom})]
     if shape != "v_shape" and rng.random() < 0.7:                    # bedded pipe at the (flat) trench bottom
-        mat = rng.choice(["pvc", "pec", "concrete"]); r = rng.uniform(0.03, 0.06)
+        mat = rng.choice(["pvc", "steel", "concrete"]); r = rng.uniform(0.03, 0.06)
         sc.add_pipe(center_x_m=cx, depth_m=bottom - 0.08, radius_m=r, material=mat)
         objs.append(_obj("pipe", mat, x=cx, depth=bottom - 0.08, radius=r))
     note = f"{shape} {backfill} trench in {native}"
@@ -191,7 +192,7 @@ def build_protective_concrete(rng):
                depth_bottom_m=slab_top + slab_h, material="concrete", name="protective_slab")
     objs = [_obj("protective_slab", "concrete",
                  box={"x_min": cx - sw / 2, "x_max": cx + sw / 2, "depth_top": slab_top, "depth_bottom": slab_top + slab_h})]
-    mat = rng.choice(["pec", "pvc", "concrete"]); pz = slab_top + slab_h + rng.uniform(0.12, 0.3)
+    mat = rng.choice(["steel", "pvc", "concrete"]); pz = slab_top + slab_h + rng.uniform(0.12, 0.3)
     r = rng.uniform(0.04, 0.07)
     sc.add_pipe(center_x_m=cx + rng.uniform(-0.1, 0.1), depth_m=pz, radius_m=r, material=mat)
     objs.append(_obj("pipe", mat, x=cx, depth=pz, radius=r))
@@ -232,8 +233,8 @@ def build_rebar_mesh(rng):
     objs = []
     for i in range(n):
         x = 0.15 + i * spacing
-        sc.add_pipe(center_x_m=x, depth_m=z, radius_m=0.01, material="pec")
-        objs.append(_obj("rebar", "pec", x=x, depth=z, radius=0.01, ambiguity=True))
+        sc.add_pipe(center_x_m=x, depth_m=z, radius_m=0.01, material="steel")
+        objs.append(_obj("rebar", "steel", x=x, depth=z, radius=0.01, ambiguity=True))
     return sc, objs, _meta("rebar_mesh", soil, D, ambiguity=True,
                            note=f"{n} bars @ {spacing*100:.0f} cm -> periodic hyperbolas")
 
