@@ -32,7 +32,8 @@ import numpy as np
 from gpr_agent import sim_scenes as S
 from subsurface_platform.domain.host_correlation import (
     scene_host_coupling, correlated_shape_for, material_for, burial_depth_for)
-from gpr_data_processing.footprint import scan_coverage   # footprint-based acquisition preflight
+from gpr_data_processing.footprint import footprint_half_width_m   # footprint physics (single source)
+from subsurface_platform.domain.acquisition_coverage import coverage as _coverage   # domain preflight (DI)
 
 OUT_ROOT = Path("e:/github/GPR-Sim/data/generated_corpus")
 SOILS = ["dry_sand", "dry_clay", "moist_limestone", "saturated_sand", "wet_clay", "silt", "loam"]
@@ -373,8 +374,10 @@ def run_one(scene_type: str, idx: int, seed: int, log, realistic_host_prob: floa
     # hyperbola wings), spatial (trace spacing below the anti-alias limit). Extend within the domain.
     cov_targets = _coverage_targets(objs)
     if cov_targets and not n_traces_override:
-        pre = scan_coverage(cov_targets, scan_start, scan_start + (n_traces - 1) * scan_step,
-                            meta["host_eps_r"], meta["fc_hz"], time_window_ns=tw_s * 1e9, n_traces=n_traces)
+        pre = _coverage(cov_targets, scan_x_min_m=scan_start,
+                        scan_x_max_m=scan_start + (n_traces - 1) * scan_step,
+                        host_eps_r=meta["host_eps_r"], fc_hz=meta["fc_hz"],
+                        footprint_fn=footprint_half_width_m, n_traces=n_traces, time_window_ns=tw_s * 1e9)
         if not pre["all_covered"]:
             scan_start = round(max(0.03, pre["recommended_scan_x_min_m"]), 4)
             scan_end = round(min(sc.width_m - 0.03, pre["recommended_scan_x_max_m"]), 4)
@@ -395,9 +398,11 @@ def run_one(scene_type: str, idx: int, seed: int, log, realistic_host_prob: floa
     # Post-run coverage with the ACTUAL dt / n_samples / traces (records what the output really covers).
     scan_cov = None
     if cov_targets:
-        scan_cov = scan_coverage(cov_targets, scan_start, scan_start + (b.shape[1] - 1) * dx_m,
-                                 meta["host_eps_r"], meta["fc_hz"],
-                                 time_window_ns=dt_ns * b.shape[0], dt_ns=dt_ns, n_traces=b.shape[1])
+        scan_cov = _coverage(cov_targets, scan_x_min_m=scan_start,
+                             scan_x_max_m=scan_start + (b.shape[1] - 1) * dx_m,
+                             host_eps_r=meta["host_eps_r"], fc_hz=meta["fc_hz"],
+                             footprint_fn=footprint_half_width_m, n_traces=b.shape[1],
+                             time_window_ns=dt_ns * b.shape[0], dt_ns=dt_ns)
         if not scan_cov["all_covered"]:
             log(f"  WARN coverage {out_dir.name}: lat={scan_cov['all_lateral_covered']} "
                 f"temp={scan_cov.get('all_temporal_covered')} aa={scan_cov.get('antialias_ok')} "
