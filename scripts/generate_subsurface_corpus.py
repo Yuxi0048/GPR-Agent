@@ -333,8 +333,21 @@ def run_one(scene_type: str, idx: int, seed: int, log, realistic_host_prob: floa
                     time_window_s=meta["time_window_s"], gpu=True)
     dt_ns, dx_m, b = r["dt_ns"], r["dx_m"], r["bscan"]
     _save_preview(out_dir / "bscan.png", b)
+    # Domain-native artifact (Phase 4): lift the scene into a SimulationCard with typed features,
+    # spatial/construction relations, a HostProfile and a derived composition -- written as card.json
+    # next to the flat labels.json. Best-effort so a domain-import hiccup never fails generation.
+    scene_composition = None
+    try:
+        import corpus_domain as _CD
+        _card, _ = _CD.build_card_for_scene(card_id=out_dir.name, scene_type=scene_type, soil=host,
+                                            objs=objs, coupling=None, note=meta["note"])
+        (out_dir / "card.json").write_text(_card.to_json(), encoding="utf-8")
+        scene_composition = _card.scene_composition.value
+    except Exception as e:                                          # pragma: no cover
+        log(f"  WARN domain card {out_dir.name}: {type(e).__name__}: {str(e)[:120]}")
     labels = {
         "scene_type": scene_type, "ambiguity": meta["ambiguity"], "note": meta["note"],
+        "scene_composition": scene_composition,
         "host_material": meta["host_material"], "host_eps_r": meta["host_eps_r"],
         "host_coupling": host_coupling,
         "soil_heterogeneity": het,
@@ -362,6 +375,7 @@ def run_one(scene_type: str, idx: int, seed: int, log, realistic_host_prob: floa
     with (OUT_ROOT / "manifest.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps({"dir": str(out_dir.relative_to(OUT_ROOT)), "scene_type": scene_type,
                             "ambiguity": meta["ambiguity"], "n_objects": len(objs),
+                            "scene_composition": scene_composition,
                             "host": meta["host_material"],
                             "host_realistic": drawn_realistic, "realistic_prob": realistic_host_prob,
                             "bscan_shape": list(b.shape),
