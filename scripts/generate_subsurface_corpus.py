@@ -39,6 +39,38 @@ SCENE_WEIGHTS = {                       # how often each type is drawn
     "protective_concrete": 2, "tree_roots": 2, "boulder_field": 2, "rebar_mesh": 1,
 }
 
+# Host-coupling policy --------------------------------------------------------------------------
+# The geologically/contextually PLAUSIBLE host set per scene type -- the "realistic" pole of the
+# decorrelation policy in run_one(). A type absent here (or whose set == SOILS) is host-agnostic
+# (a pipe can sit in any soil), so realistic and decorrelated draws coincide -> no host bias.
+# IMPORTANT: the coupling *strength* (the probability of using the realistic set vs. a fully random
+# host) is deliberately NOT defined here. It is supplied per run via --realistic-host-prob so the
+# platform never bakes in a coupling constant. Edit the SETS (domain knowledge); pass the PROB.
+HOST_COUPLING = {
+    "utility_trench": ["wet_clay", "dry_clay", "moist_limestone", "silt", "loam"],
+    "protective_concrete": ["loam", "dry_sand", "silt", "wet_clay"],
+    "tree_roots": ["topsoil_moist", "loam", "silt", "dry_sand"],
+    "boulder_field": ["dry_sand", "saturated_sand", "silt", "loam", "wet_clay"],
+    "duct_bank": ["loam", "dry_sand", "wet_clay", "silt"],
+    "rebar_mesh": ["concrete", "dry_sand"],
+    # single_pipe: host-agnostic -> falls back to SOILS (no bias).
+    # (future) build_cavity: karst/dome voids -> ["moist_limestone"], slab gaps -> ["concrete"], ...
+}
+
+
+def choose_host(scene_type: str, host_rng, realistic_prob: float) -> tuple[str, bool, list[str]]:
+    """Pick the scene host under the decorrelation policy.
+
+    With probability ``realistic_prob`` the host is drawn from the type's plausible set
+    (``HOST_COUPLING``); otherwise from ALL hosts (``SOILS``) -- breaking the host->type shortcut
+    so a model cannot infer the object from the background. ``realistic_prob`` is the operator's
+    per-run control, not a platform constant. Returns (host, drawn_realistic, natural_set).
+    """
+    natural = HOST_COUPLING.get(scene_type) or SOILS
+    drawn_realistic = bool(host_rng.random() < realistic_prob)
+    host = str(host_rng.choice(natural if drawn_realistic else SOILS))
+    return host, drawn_realistic, list(natural)
+
 
 def _eps(mat: str) -> float:
     try:
@@ -269,9 +301,22 @@ SCAN_MARGIN_M = 0.10
 SCAN_STEP_M = 0.02            # trace spacing (good lateral hyperbola sampling at 800 MHz)
 
 
-def run_one(scene_type: str, idx: int, seed: int, log, n_traces_override: int = 0):
+def run_one(scene_type: str, idx: int, seed: int, log, realistic_host_prob: float,
+            n_traces_override: int = 0):
     rng = np.random.default_rng(seed)
     sc, objs, meta = all_builders()[scene_type](rng)
+    # Host-coupling policy: decorrelate object<->host with the operator-set probability. The host
+    # the builder picked is overridden here so the choice is centralized and recorded. A SEPARATE
+    # RNG (seeded from `seed`) keeps object/clutter draws byte-identical regardless of the prob.
+    host_rng = np.random.default_rng([seed, 0x484F5354])           # "HOST"
+    host, drawn_realistic, natural = choose_host(scene_type, host_rng, realistic_host_prob)
+    sc.soil_material = host
+    meta["host_material"] = host
+    meta["host_eps_r"] = round(_eps(host), 3)
+    _v = 3e8 / math.sqrt(max(_eps(host), 1.0))                     # recompute host-dependent window
+    meta["time_window_s"] = float(min(max(2.2 * (sc.soil_depth_m + 0.12) / _v + 3e-9, 1.0e-8), 2.2e-8))
+    host_coupling = {"realistic_prob": realistic_host_prob, "drawn_realistic": drawn_realistic,
+                     "decorrelated": not drawn_realistic, "natural_hosts": natural}
     # Heterogeneous background soil: a correlated random eps_r field (realistic clutter).
     het = {"eps_spread_frac": 0.12, "correlation_length_m": float(rng.uniform(0.06, 0.15)),
            "n_levels": 9, "seed": seed}
@@ -291,6 +336,7 @@ def run_one(scene_type: str, idx: int, seed: int, log, n_traces_override: int = 
     labels = {
         "scene_type": scene_type, "ambiguity": meta["ambiguity"], "note": meta["note"],
         "host_material": meta["host_material"], "host_eps_r": meta["host_eps_r"],
+        "host_coupling": host_coupling,
         "soil_heterogeneity": het,
         "objects": objs,
         "acquisition": {"fc_hz": meta["fc_hz"], "n_traces": meta["n_traces"], "dx_m": dx_m,
@@ -316,10 +362,12 @@ def run_one(scene_type: str, idx: int, seed: int, log, n_traces_override: int = 
     with (OUT_ROOT / "manifest.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps({"dir": str(out_dir.relative_to(OUT_ROOT)), "scene_type": scene_type,
                             "ambiguity": meta["ambiguity"], "n_objects": len(objs),
-                            "host": meta["host_material"], "bscan_shape": list(b.shape),
+                            "host": meta["host_material"],
+                            "host_realistic": drawn_realistic, "realistic_prob": realistic_host_prob,
+                            "bscan_shape": list(b.shape),
                             "wall_s": prov["wall_s"], "created_at": prov["created_at"]}) + "\n")
-    log(f"  OK  {scene_type:20s} {b.shape} host={meta['host_material']:14s} "
-        f"objs={len(objs)} {prov['wall_s']:.0f}s -> {out_dir.name}")
+    log(f"  OK  {scene_type:20s} {b.shape} host={meta['host_material']:14s}"
+        f"[{'real ' if drawn_realistic else 'decorr'}] objs={len(objs)} {prov['wall_s']:.0f}s -> {out_dir.name}")
     return out_dir
 
 
@@ -330,7 +378,15 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--only", type=str, default="", help="comma list to restrict scene types")
     ap.add_argument("--n-traces", type=int, default=0, help="override traces/scene (verification)")
+    # Decorrelation control. REQUIRED on purpose: the host-coupling strength is an experiment knob,
+    # not a platform constant. p=1 -> always the type's plausible host (realistic, host leaks type);
+    # p=0 -> host always random (fully decorrelated); 0<p<1 -> a measurable mix of both.
+    ap.add_argument("--realistic-host-prob", type=float, required=True,
+                    help="prob in [0,1] of drawing the type's geologically-plausible host; else a "
+                         "random host (decorrelated). No default -- set it per run.")
     args = ap.parse_args()
+    if not 0.0 <= args.realistic_host_prob <= 1.0:
+        ap.error(f"--realistic-host-prob must be in [0,1]; got {args.realistic_host_prob}")
 
     OUT_ROOT.mkdir(parents=True, exist_ok=True)
     logf = OUT_ROOT / "generation.log"
@@ -347,14 +403,15 @@ def main():
     rng = np.random.default_rng(args.seed)
     deadline = time.time() + args.hours * 3600.0
     log(f"=== corpus generation start: {len(types)} types, max={args.max}, "
-        f"deadline={args.hours}h, out={OUT_ROOT} ===")
+        f"deadline={args.hours}h, realistic_host_prob={args.realistic_host_prob}, out={OUT_ROOT} ===")
     n_ok = n_fail = 0
     idx = 0
     while time.time() < deadline and n_ok < args.max:
         scene_type = str(rng.choice(pool))
         seed = int(rng.integers(0, 2**31 - 1))
         try:
-            run_one(scene_type, idx, seed, log, n_traces_override=args.n_traces)
+            run_one(scene_type, idx, seed, log, args.realistic_host_prob,
+                    n_traces_override=args.n_traces)
             n_ok += 1
         except Exception as e:                                          # isolate every scene
             n_fail += 1
