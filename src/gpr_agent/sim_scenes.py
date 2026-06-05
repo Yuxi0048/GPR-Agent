@@ -44,7 +44,11 @@ def _gprmax_gpu_runner(out_dir: Path, gpu: bool):
 def em_spec(material: str) -> dict:
     """(eps_r, sigma, mu_r, sigma_star) for a material id. Metal => sigma='inf' (PEC-like)."""
     m = material.strip().lower()
-    if m in ("metal", "pec", "steel"):
+    # Conductive utility materials -> PEC idealization (the metallic sheath/wall dominates the
+    # reflection): steel, cast iron, and lead-covered cable (PILC). `pec` is the EM idealization;
+    # prefer the real material name (steel / cast_iron) in labels.
+    if m in ("metal", "pec", "steel", "cast_iron", "cast iron", "lead",
+             "pilc", "paper_insulated_lead_covered"):
         return {"eps_r": 1.0, "sigma": "inf", "mu_r": 1.0, "sigma_star": 0.0}
     if m in ("air", "void", "free_space"):
         return {"eps_r": 1.0, "sigma": 0.0, "mu_r": 1.0, "sigma_star": 0.0}
