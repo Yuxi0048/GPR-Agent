@@ -30,6 +30,7 @@ from pathlib import Path
 import numpy as np
 
 from gpr_agent import sim_scenes as S
+from subsurface_platform.domain.host_correlation import scene_host_coupling
 
 OUT_ROOT = Path("e:/github/GPR-Sim/data/generated_corpus")
 SOILS = ["dry_sand", "dry_clay", "moist_limestone", "saturated_sand", "wet_clay", "silt", "loam"]
@@ -39,23 +40,14 @@ SCENE_WEIGHTS = {                       # how often each type is drawn
     "protective_concrete": 2, "tree_roots": 2, "boulder_field": 2, "rebar_mesh": 1,
 }
 
-# Host-coupling policy --------------------------------------------------------------------------
-# The geologically/contextually PLAUSIBLE host set per scene type -- the "realistic" pole of the
-# decorrelation policy in run_one(). A type absent here (or whose set == SOILS) is host-agnostic
-# (a pipe can sit in any soil), so realistic and decorrelated draws coincide -> no host bias.
-# IMPORTANT: the coupling *strength* (the probability of using the realistic set vs. a fully random
-# host) is deliberately NOT defined here. It is supplied per run via --realistic-host-prob so the
-# platform never bakes in a coupling constant. Edit the SETS (domain knowledge); pass the PROB.
-HOST_COUPLING = {
-    "utility_trench": ["wet_clay", "dry_clay", "moist_limestone", "silt", "loam"],
-    "protective_concrete": ["loam", "dry_sand", "silt", "wet_clay"],
-    "tree_roots": ["topsoil_moist", "loam", "silt", "dry_sand"],
-    "boulder_field": ["dry_sand", "saturated_sand", "silt", "loam", "wet_clay"],
-    "duct_bank": ["loam", "dry_sand", "wet_clay", "silt"],
-    "rebar_mesh": ["concrete", "dry_sand"],
-    # single_pipe: host-agnostic -> falls back to SOILS (no bias).
-    # (future) build_cavity: karst/dome voids -> ["moist_limestone"], slab gaps -> ["concrete"], ...
-}
+# Host-correlation policy -----------------------------------------------------------------------
+# The plausible host set per scene type is READ from the single source of truth,
+# subsurface_platform.domain.host_correlation.CORRELATION_TABLE (Step 2 of
+# GPR-Workbench/docs/coupling-revision-plan.md) -- no local copy. A type absent from the derived map
+# is host-agnostic (falls back to SOILS in choose_host). Edit the SETS in host_correlation.py
+# (domain knowledge); the correlation STRENGTH stays an operator input (--realistic-host-prob),
+# never a platform constant.
+HOST_COUPLING = scene_host_coupling()
 
 
 def choose_host(scene_type: str, host_rng, realistic_prob: float) -> tuple[str, bool, list[str]]:
