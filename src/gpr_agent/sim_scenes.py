@@ -64,9 +64,10 @@ def em_spec(material: str) -> dict:
         return {"eps_r": round(0.5 * (o["eps_r_surface_min"] + o["eps_r_surface_max"]), 3),
                 "sigma": 0.0, "mu_r": 1.0, "sigma_star": 0.0}
     # Common construction / natural dielectrics the KB material DB does not carry yet.
-    # Representative mid-range (eps_r, sigma S/m) at GPR frequencies (Daniels 2004;
-    # Cassidy 2009; Annan 2005). SIMULATION inputs (physical properties, not GT-fit);
-    # migrate into gpr_kb.reference when the KB gains construction materials.
+    # Representative mid-range (eps_r, sigma S/m) at GPR frequencies, VERIFIED against on-file
+    # primaries: Cassidy 2009 Table 2.1 (soils/rock/concrete/water/ice); Cao 2022 (asphalt, AC bulk
+    # 3-12, binder 3); Soutsos 2001 (concrete); Peplinski 1995 (soils). SIMULATION inputs (physical
+    # properties, not GT-fit); migrate into gpr_kb.reference when the KB gains construction materials.
     _LIT = {
         "concrete": (6.5, 0.02), "concrete_dry": (5.5, 0.01), "concrete_moist": (8.5, 0.04),
         "gravel": (5.0, 0.001), "wet_clay": (22.0, 0.05), "wet_sand": (22.0, 0.01),
