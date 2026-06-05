@@ -32,6 +32,7 @@ import numpy as np
 from gpr_agent import sim_scenes as S
 from subsurface_platform.domain.host_correlation import (
     scene_host_coupling, correlated_shape_for, material_for, burial_depth_for)
+from gpr_data_processing.footprint import scan_coverage   # footprint-based acquisition preflight
 
 OUT_ROOT = Path("e:/github/GPR-Sim/data/generated_corpus")
 SOILS = ["dry_sand", "dry_clay", "moist_limestone", "saturated_sand", "wet_clay", "silt", "loam"]
@@ -96,6 +97,25 @@ def _meta(stype, soil, soil_depth, *, fc=8e8, n_traces=40, ambiguity=False, note
             "fc_hz": fc, "n_traces": n_traces, "dx_m": 0.005,
             "time_window_s": float(min(max(tw, 1.0e-8), 2.2e-8)),
             "ambiguity": ambiguity, "note": note}
+
+
+def _coverage_targets(objs):
+    """(center_x_m, depth_m, half_extent_m) per target for the scan-coverage preflight.
+    Skips the full-width topsoil cap (context, not a localized target)."""
+    out = []
+    for o in objs:
+        if o.get("kind") == "topsoil_cap":
+            continue
+        if "center_x_m" in o:
+            out.append((float(o["center_x_m"]), float(o["depth_m"]), float(o.get("radius_m", 0.0))))
+        elif "box_m" in o:
+            b = o["box_m"]
+            out.append((0.5 * (b["x_min"] + b["x_max"]), 0.5 * (b["depth_top"] + b["depth_bottom"]),
+                        0.5 * (b["x_max"] - b["x_min"])))
+        elif "polygon_m" in o:
+            xs = [p[0] for p in o["polygon_m"]]; zs = [p[1] for p in o["polygon_m"]]
+            out.append((0.5 * (min(xs) + max(xs)), 0.5 * (min(zs) + max(zs)), 0.5 * (max(xs) - min(xs))))
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -347,15 +367,41 @@ def run_one(scene_type: str, idx: int, seed: int, log, realistic_host_prob: floa
     sc.soil_heterogeneity = het
     span = max(sc.width_m - 2 * SCAN_MARGIN_M, SCAN_STEP_M)
     n_traces = n_traces_override or max(24, int(round(span / SCAN_STEP_M)) + 1)
+    scan_start, scan_step, tw_s = SCAN_MARGIN_M, SCAN_STEP_M, meta["time_window_s"]
+    # Footprint-based scan-coverage PRE-FLIGHT (GPR-Tools): ensure every target's COMPLETE signature
+    # is captured -- lateral (scan reaches the footprint edges), temporal (trace long enough for the
+    # hyperbola wings), spatial (trace spacing below the anti-alias limit). Extend within the domain.
+    cov_targets = _coverage_targets(objs)
+    if cov_targets and not n_traces_override:
+        pre = scan_coverage(cov_targets, scan_start, scan_start + (n_traces - 1) * scan_step,
+                            meta["host_eps_r"], meta["fc_hz"], time_window_ns=tw_s * 1e9, n_traces=n_traces)
+        if not pre["all_covered"]:
+            scan_start = round(max(0.03, pre["recommended_scan_x_min_m"]), 4)
+            scan_end = round(min(sc.width_m - 0.03, pre["recommended_scan_x_max_m"]), 4)
+            n_traces = max(n_traces, int(round((scan_end - scan_start) / SCAN_STEP_M)) + 1,
+                           int(pre.get("recommended_n_traces", n_traces)))
+            scan_step = (scan_end - scan_start) / max(n_traces - 1, 1)
+            tw_s = float(min(3.0e-8, max(tw_s, pre["recommended_time_window_ns"] * 1e-9 * 1.1)))
+            meta["time_window_s"] = tw_s
     meta["n_traces"] = n_traces
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     out_dir = OUT_ROOT / scene_type / f"{scene_type}_{ts}_{idx:05d}"
     out_dir.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     r = S.run_bscan(sc, out_dir=out_dir, fc_hz=meta["fc_hz"], n_traces=n_traces,
-                    scan_start_m=SCAN_MARGIN_M, scan_step_m=SCAN_STEP_M,
-                    time_window_s=meta["time_window_s"], gpu=True)
+                    scan_start_m=scan_start, scan_step_m=scan_step,
+                    time_window_s=tw_s, gpu=True)
     dt_ns, dx_m, b = r["dt_ns"], r["dx_m"], r["bscan"]
+    # Post-run coverage with the ACTUAL dt / n_samples / traces (records what the output really covers).
+    scan_cov = None
+    if cov_targets:
+        scan_cov = scan_coverage(cov_targets, scan_start, scan_start + (b.shape[1] - 1) * dx_m,
+                                 meta["host_eps_r"], meta["fc_hz"],
+                                 time_window_ns=dt_ns * b.shape[0], dt_ns=dt_ns, n_traces=b.shape[1])
+        if not scan_cov["all_covered"]:
+            log(f"  WARN coverage {out_dir.name}: lat={scan_cov['all_lateral_covered']} "
+                f"temp={scan_cov.get('all_temporal_covered')} aa={scan_cov.get('antialias_ok')} "
+                f"(domain may be too narrow / cap hit)")
     _save_preview(out_dir / "bscan.png", b)
     # Domain-native artifact (Phase 4): lift the scene into a SimulationCard with typed features,
     # spatial/construction relations, a HostProfile and a derived composition -- written as card.json
@@ -378,10 +424,11 @@ def run_one(scene_type: str, idx: int, seed: int, log, realistic_host_prob: floa
         "objects": objs,
         "acquisition": {"fc_hz": meta["fc_hz"], "n_traces": meta["n_traces"], "dx_m": dx_m,
                         "dt_ns": dt_ns, "time_window_s": meta["time_window_s"],
-                        "scan_start_m": SCAN_MARGIN_M, "scan_step_m": SCAN_STEP_M,
-                        "scan_extent_m": [SCAN_MARGIN_M, round(SCAN_MARGIN_M + (b.shape[1] - 1) * dx_m, 4)],
+                        "scan_start_m": round(scan_start, 4), "scan_step_m": round(scan_step, 5),
+                        "scan_extent_m": [round(scan_start, 4), round(scan_start + (b.shape[1] - 1) * dx_m, 4)],
                         "scene_width_m": sc.width_m,
-                        "scan_width_m": round(dx_m * b.shape[1], 4)},
+                        "scan_width_m": round(dx_m * b.shape[1], 4),
+                        "scan_coverage": scan_cov},     # footprint preflight: complete-signature check
         "bscan_shape": list(b.shape), "material_order": r["material_order"],
     }
     (out_dir / "labels.json").write_text(json.dumps(labels, indent=2), encoding="utf-8")
