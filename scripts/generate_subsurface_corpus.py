@@ -30,7 +30,8 @@ from pathlib import Path
 import numpy as np
 
 from gpr_agent import sim_scenes as S
-from subsurface_platform.domain.host_correlation import scene_host_coupling, correlated_shape_for
+from subsurface_platform.domain.host_correlation import (
+    scene_host_coupling, correlated_shape_for, material_for, burial_depth_for)
 
 OUT_ROOT = Path("e:/github/GPR-Sim/data/generated_corpus")
 SOILS = ["dry_sand", "dry_clay", "moist_limestone", "saturated_sand", "wet_clay", "silt", "loam"]
@@ -100,17 +101,23 @@ def _meta(stype, soil, soil_depth, *, fc=8e8, n_traces=40, ambiguity=False, note
 # --------------------------------------------------------------------------- #
 # Scene builders -> (Scene, list[label objects], meta)
 # --------------------------------------------------------------------------- #
-def build_single_pipe(rng):
-    soil = rng.choice(SOILS); W = rng.uniform(1.0, 1.4); D = rng.uniform(0.65, 0.9)
+def build_single_pipe(rng, host_soil=None, setting="modern",
+                       material_realistic=True, depth_realistic=True):
+    # Correlation rows (domain host_correlation, strength-gated): pipe MATERIAL <-> installation era
+    # (old_urban -> cast iron / AC; modern -> plastic; AWWA / ter Huurne 2024) and burial DEPTH <->
+    # ground (frost-susceptible fine soils deeper, rock shallow; ASCE 32). host_soil=None / defaults
+    # -> legacy behavior for promoted templates.
+    soil = host_soil or rng.choice(SOILS); W = rng.uniform(1.0, 1.4); D = rng.uniform(0.65, 0.9)
     sc = S.Scene(width_m=W, soil_depth_m=D, dx_m=0.005, soil_material=soil)
-    x = rng.uniform(0.35, W - 0.35); z = rng.uniform(0.20, 0.50); r = rng.uniform(0.03, 0.07)
-    mat = rng.choice(PIPE_MATS)
+    x = rng.uniform(0.35, W - 0.35); r = rng.uniform(0.03, 0.07)
+    mat = material_for("single_pipe", setting, rng, realistic=material_realistic)
+    z = burial_depth_for(soil, rng, 0.20, D - 0.12, realistic=depth_realistic)
     sc.add_pipe(center_x_m=x, depth_m=z, radius_m=r, material=mat)
     objs = [_obj("pipe", mat, x=x, depth=z, radius=r)]
-    if mat in ("pvc", "hdpe", "concrete") and rng.random() < 0.6:        # empty -> inner air
+    if mat in ("pvc", "hdpe", "poly_ethylene", "concrete") and rng.random() < 0.6:   # empty -> inner air
         sc.add_void(center_x_m=x, depth_m=z, radius_m=r * 0.7, material="air")
         objs.append(_obj("pipe_void", "air", x=x, depth=z, radius=r * 0.7))
-    return sc, objs, _meta("single_pipe", soil, D, note=f"{mat} pipe")
+    return sc, objs, _meta("single_pipe", soil, D, note=f"{mat} pipe ({setting}) @ {z:.2f}m")
 
 
 def build_duct_bank(rng):
@@ -307,12 +314,20 @@ def run_one(scene_type: str, idx: int, seed: int, log, realistic_host_prob: floa
     host_rng = np.random.default_rng([seed, 0x484F5354])           # "HOST"
     host, drawn_realistic, natural = choose_host(scene_type, host_rng, realistic_host_prob)
     _builders = all_builders()
-    shape_realistic = None
+    # Per-mechanism realistic flags, each an independent draw at the SAME strength (host_rng, a
+    # separate stream so object/geometry draws stay byte-stable). None where not applicable.
+    shape_realistic = material_realistic = depth_realistic = None
+    setting = None
     if scene_type == "utility_trench":
-        # Step 4: the same strength gates shape<->soil. host_rng (separate stream) makes the decision,
-        # so object/geometry draws stay byte-stable; rng still picks the actual shape (one draw).
-        shape_realistic = bool(host_rng.random() < realistic_host_prob)
+        shape_realistic = bool(host_rng.random() < realistic_host_prob)   # shape <-> soil (OSHA/EC7)
         sc, objs, meta = _builders[scene_type](rng, host_soil=host, shape_realistic=shape_realistic)
+    elif scene_type == "single_pipe":
+        setting = str(host_rng.choice(["old_urban", "modern", "greenfield"]))
+        material_realistic = bool(host_rng.random() < realistic_host_prob)  # material <-> era
+        depth_realistic = bool(host_rng.random() < realistic_host_prob)     # depth <-> ground
+        sc, objs, meta = _builders[scene_type](rng, host_soil=host, setting=setting,
+                                               material_realistic=material_realistic,
+                                               depth_realistic=depth_realistic)
     else:
         sc, objs, meta = _builders[scene_type](rng)
     sc.soil_material = host
@@ -322,7 +337,10 @@ def run_one(scene_type: str, idx: int, seed: int, log, realistic_host_prob: floa
     meta["time_window_s"] = float(min(max(2.2 * (sc.soil_depth_m + 0.12) / _v + 3e-9, 1.0e-8), 2.2e-8))
     host_coupling = {"realistic_prob": realistic_host_prob, "drawn_realistic": drawn_realistic,
                      "decorrelated": not drawn_realistic, "natural_hosts": natural,
-                     "shape_realistic": shape_realistic}   # Step 4: None=N/A, else shape<->soil draw
+                     "shape_realistic": shape_realistic,        # trench shape <-> soil (None=N/A)
+                     "setting": setting,                        # single_pipe installation era
+                     "material_realistic": material_realistic,  # pipe material <-> era
+                     "depth_realistic": depth_realistic}        # pipe depth <-> ground
     # Heterogeneous background soil: a correlated random eps_r field (realistic clutter).
     het = {"eps_spread_frac": 0.12, "correlation_length_m": float(rng.uniform(0.06, 0.15)),
            "n_levels": 9, "seed": seed}
