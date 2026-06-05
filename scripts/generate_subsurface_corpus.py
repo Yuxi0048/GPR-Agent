@@ -51,13 +51,15 @@ def _is_conductor(mat: str) -> bool:
     return mat.strip().lower() in ("pec", "metal", "steel")
 
 
-def _obj(kind, material, *, x=None, depth=None, radius=None, box=None, ambiguity=False):
+def _obj(kind, material, *, x=None, depth=None, radius=None, box=None, polygon=None, ambiguity=False):
     d = {"kind": kind, "material": material, "eps_r": round(_eps(material), 3),
          "conductor": _is_conductor(material), "ambiguity": ambiguity}
     if x is not None:
         d.update(center_x_m=round(x, 4), depth_m=round(depth, 4), radius_m=round(radius, 4))
     if box is not None:
         d["box_m"] = {k: round(v, 4) for k, v in box.items()}
+    if polygon is not None:
+        d["polygon_m"] = [[round(px, 4), round(pz, 4)] for px, pz in polygon]
     return d
 
 
@@ -115,16 +117,37 @@ def build_utility_trench(rng):
     sc = S.Scene(width_m=W, soil_depth_m=D, dx_m=0.005, soil_material=native)
     tw_ = rng.uniform(0.35, 0.6); cx = rng.uniform(tw_ / 2 + 0.15, W - tw_ / 2 - 0.15)
     bottom = rng.uniform(0.5, 0.75)
-    sc.add_box(x_min_m=cx - tw_ / 2, x_max_m=cx + tw_ / 2, depth_top_m=0.0,
-               depth_bottom_m=bottom, material=backfill, name="trench_backfill")
-    objs = [_obj("trench_backfill", backfill,
-                 box={"x_min": cx - tw_ / 2, "x_max": cx + tw_ / 2, "depth_top": 0.0, "depth_bottom": bottom})]
-    if rng.random() < 0.7:                                               # bedded pipe at trench bottom
+    htop = tw_ / 2
+    # trench_shape: box (vertical walls) | trapezoid (sloped, narrower floor) | v_shape (triangular, apex at floor)
+    shape = rng.choice(["box", "trapezoid", "v_shape"])
+    if shape == "box":
+        sc.add_box(x_min_m=cx - htop, x_max_m=cx + htop, depth_top_m=0.0,
+                   depth_bottom_m=bottom, material=backfill, name="trench_backfill")
+        objs = [_obj("trench_backfill", backfill,
+                     box={"x_min": cx - htop, "x_max": cx + htop, "depth_top": 0.0, "depth_bottom": bottom})]
+    elif shape == "trapezoid":
+        hbot = htop * rng.uniform(0.45, 0.8)                         # narrower floor
+        corners = [(cx - htop, 0.0), (cx + htop, 0.0), (cx + hbot, bottom), (cx - hbot, bottom)]
+        sc.add_polygon(corners_xz=corners, material=backfill, name="trench_backfill")
+        objs = [_obj("trench_backfill", backfill, polygon=corners,
+                     box={"x_min": cx - htop, "x_max": cx + htop, "depth_top": 0.0, "depth_bottom": bottom})]
+    else:                                                            # v_shape: triangle converging to an apex
+        corners = [(cx - htop, 0.0), (cx + htop, 0.0), (cx, bottom)]
+        sc.add_polygon(corners_xz=corners, material=backfill, name="trench_backfill")
+        objs = [_obj("trench_backfill", backfill, polygon=corners,
+                     box={"x_min": cx - htop, "x_max": cx + htop, "depth_top": 0.0, "depth_bottom": bottom})]
+    if shape != "v_shape" and rng.random() < 0.7:                    # bedded pipe at the (flat) trench bottom
         mat = rng.choice(["pvc", "pec", "concrete"]); r = rng.uniform(0.03, 0.06)
         sc.add_pipe(center_x_m=cx, depth_m=bottom - 0.08, radius_m=r, material=mat)
         objs.append(_obj("pipe", mat, x=cx, depth=bottom - 0.08, radius=r))
-    return sc, objs, _meta("utility_trench", native, D,
-                           note=f"{backfill} backfill in {native}")
+    note = f"{shape} {backfill} trench in {native}"
+    if rng.random() < 0.5:                                           # resurfaced trench: full-width topsoil cap on top
+        ts = rng.uniform(0.08, 0.16); ts_mat = rng.choice(["topsoil_moist", "loam"])
+        sc.add_layer(depth_top_m=0.0, thickness_m=ts, material=ts_mat)   # painted last -> caps the trench
+        objs.append(_obj("topsoil_cap", ts_mat,
+                         box={"x_min": 0.0, "x_max": round(W, 4), "depth_top": 0.0, "depth_bottom": round(ts, 4)}))
+        note += f" + {ts_mat} topsoil cap"
+    return sc, objs, _meta("utility_trench", native, D, note=note)
 
 
 def build_protective_concrete(rng):

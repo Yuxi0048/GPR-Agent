@@ -133,6 +133,18 @@ class Scene:
                                  material, name or f"{material}_box"))
         return self
 
+    def add_polygon(self, *, corners_xz, material: str, name: str | None = None):
+        """An arbitrary polygonal cross-section. ``corners_xz`` = ``[(x_m, depth_m), ...]``
+        in order (depth measured down from the surface). Gives sloped / converging walls
+        -- used for trapezoidal (4 corners) or V-shaped (3 corners, apex at the floor)
+        excavated pits (TU1208-like trenches), unlike add_box's vertical sides."""
+        from build123d import Polygon, extrude
+        pts = [(float(x), self.soil_depth_m - float(d)) for (x, d) in corners_xz]   # depth -> y (y up)
+        face = Polygon(*pts, align=None)
+        solid = extrude(face, amount=2 * self.dx_m, both=True)   # straddle z=0 (voxelizer samples z=0)
+        self.objects.append(_Obj(solid, material, name or f"{material}_polygon"))
+        return self
+
     # ---- voxelize via OCP point-in-solid ----
     def _classifier(self, solid):
         from OCP.BRepClass3d import BRepClass3d_SolidClassifier
