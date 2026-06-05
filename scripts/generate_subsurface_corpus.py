@@ -30,7 +30,7 @@ from pathlib import Path
 import numpy as np
 
 from gpr_agent import sim_scenes as S
-from subsurface_platform.domain.host_correlation import scene_host_coupling
+from subsurface_platform.domain.host_correlation import scene_host_coupling, shape_for
 
 OUT_ROOT = Path("e:/github/GPR-Sim/data/generated_corpus")
 SOILS = ["dry_sand", "dry_clay", "moist_limestone", "saturated_sand", "wet_clay", "silt", "loam"]
@@ -135,16 +135,19 @@ def build_duct_bank(rng):
                            note=f"{cols}x{rows} conduits in concrete")
 
 
-def build_utility_trench(rng):
-    native = rng.choice(["wet_clay", "dry_clay", "moist_limestone"])
+def build_utility_trench(rng, host_soil=None):
+    # Step 3: the trench is dug in `native` (the decorrelated scene host when supplied) and its wall
+    # angle CORRELATES with that soil -- cohesive (clay) stands vertical (box); granular (sand) must
+    # slope (trapezoid / v_shape). Rule + soil->texture live in the domain (host_correlation.shape_for,
+    # OSHA 1926 Subpart P / Eurocode 7). host_soil=None -> legacy random native (back-compat).
+    native = host_soil or rng.choice(["wet_clay", "dry_clay", "moist_limestone"])
     backfill = rng.choice(["dry_sand", "gravel", "silt"])
     W = rng.uniform(1.1, 1.5); D = rng.uniform(0.7, 0.95)
     sc = S.Scene(width_m=W, soil_depth_m=D, dx_m=0.005, soil_material=native)
     tw_ = rng.uniform(0.35, 0.6); cx = rng.uniform(tw_ / 2 + 0.15, W - tw_ / 2 - 0.15)
     bottom = rng.uniform(0.5, 0.75)
     htop = tw_ / 2
-    # trench_shape: box (vertical walls) | trapezoid (sloped, narrower floor) | v_shape (triangular, apex at floor)
-    shape = rng.choice(["box", "trapezoid", "v_shape"])
+    shape = shape_for("utility_trench", native, rng)            # soil-correlated wall angle (OSHA/EC7)
     if shape == "box":
         sc.add_box(x_min_m=cx - htop, x_max_m=cx + htop, depth_top_m=0.0,
                    depth_bottom_m=bottom, material=backfill, name="trench_backfill")
@@ -297,12 +300,16 @@ SCAN_STEP_M = 0.02            # trace spacing (good lateral hyperbola sampling a
 def run_one(scene_type: str, idx: int, seed: int, log, realistic_host_prob: float,
             n_traces_override: int = 0):
     rng = np.random.default_rng(seed)
-    sc, objs, meta = all_builders()[scene_type](rng)
-    # Host-coupling policy: decorrelate object<->host with the operator-set probability. The host
-    # the builder picked is overridden here so the choice is centralized and recorded. A SEPARATE
-    # RNG (seeded from `seed`) keeps object/clutter draws byte-identical regardless of the prob.
+    # Host-correlation policy: decorrelate object<->host with the operator-set probability. The host
+    # is decided FIRST (a SEPARATE RNG seeded from `seed`, so object/clutter draws stay byte-identical
+    # regardless of the prob), so utility_trench can match its wall angle to the soil (Step 3).
     host_rng = np.random.default_rng([seed, 0x484F5354])           # "HOST"
     host, drawn_realistic, natural = choose_host(scene_type, host_rng, realistic_host_prob)
+    _builders = all_builders()
+    if scene_type == "utility_trench":
+        sc, objs, meta = _builders[scene_type](rng, host_soil=host)   # trench dug in the final host
+    else:
+        sc, objs, meta = _builders[scene_type](rng)
     sc.soil_material = host
     meta["host_material"] = host
     meta["host_eps_r"] = round(_eps(host), 3)
