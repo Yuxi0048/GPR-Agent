@@ -30,7 +30,7 @@ from pathlib import Path
 import numpy as np
 
 from gpr_agent import sim_scenes as S
-from subsurface_platform.domain.host_correlation import scene_host_coupling, shape_for
+from subsurface_platform.domain.host_correlation import scene_host_coupling, correlated_shape_for
 
 OUT_ROOT = Path("e:/github/GPR-Sim/data/generated_corpus")
 SOILS = ["dry_sand", "dry_clay", "moist_limestone", "saturated_sand", "wet_clay", "silt", "loam"]
@@ -135,11 +135,12 @@ def build_duct_bank(rng):
                            note=f"{cols}x{rows} conduits in concrete")
 
 
-def build_utility_trench(rng, host_soil=None):
-    # Step 3: the trench is dug in `native` (the decorrelated scene host when supplied) and its wall
+def build_utility_trench(rng, host_soil=None, shape_realistic=True):
+    # Step 3/4: the trench is dug in `native` (the decorrelated scene host when supplied) and its wall
     # angle CORRELATES with that soil -- cohesive (clay) stands vertical (box); granular (sand) must
-    # slope (trapezoid / v_shape). Rule + soil->texture live in the domain (host_correlation.shape_for,
-    # OSHA 1926 Subpart P / Eurocode 7). host_soil=None -> legacy random native (back-compat).
+    # slope (trapezoid / v_shape). Rule + soil->texture live in the domain (OSHA 1926 Subpart P /
+    # Eurocode 7). shape_realistic gates that correlation under the SAME --realistic-host-prob strength
+    # (False -> an off-distribution shape regardless of soil). host_soil=None -> legacy random native.
     native = host_soil or rng.choice(["wet_clay", "dry_clay", "moist_limestone"])
     backfill = rng.choice(["dry_sand", "gravel", "silt"])
     W = rng.uniform(1.1, 1.5); D = rng.uniform(0.7, 0.95)
@@ -147,7 +148,7 @@ def build_utility_trench(rng, host_soil=None):
     tw_ = rng.uniform(0.35, 0.6); cx = rng.uniform(tw_ / 2 + 0.15, W - tw_ / 2 - 0.15)
     bottom = rng.uniform(0.5, 0.75)
     htop = tw_ / 2
-    shape = shape_for("utility_trench", native, rng)            # soil-correlated wall angle (OSHA/EC7)
+    shape = correlated_shape_for("utility_trench", native, rng, realistic=shape_realistic)  # OSHA/EC7, strength-gated
     if shape == "box":
         sc.add_box(x_min_m=cx - htop, x_max_m=cx + htop, depth_top_m=0.0,
                    depth_bottom_m=bottom, material=backfill, name="trench_backfill")
@@ -306,8 +307,12 @@ def run_one(scene_type: str, idx: int, seed: int, log, realistic_host_prob: floa
     host_rng = np.random.default_rng([seed, 0x484F5354])           # "HOST"
     host, drawn_realistic, natural = choose_host(scene_type, host_rng, realistic_host_prob)
     _builders = all_builders()
+    shape_realistic = None
     if scene_type == "utility_trench":
-        sc, objs, meta = _builders[scene_type](rng, host_soil=host)   # trench dug in the final host
+        # Step 4: the same strength gates shape<->soil. host_rng (separate stream) makes the decision,
+        # so object/geometry draws stay byte-stable; rng still picks the actual shape (one draw).
+        shape_realistic = bool(host_rng.random() < realistic_host_prob)
+        sc, objs, meta = _builders[scene_type](rng, host_soil=host, shape_realistic=shape_realistic)
     else:
         sc, objs, meta = _builders[scene_type](rng)
     sc.soil_material = host
@@ -316,7 +321,8 @@ def run_one(scene_type: str, idx: int, seed: int, log, realistic_host_prob: floa
     _v = 3e8 / math.sqrt(max(_eps(host), 1.0))                     # recompute host-dependent window
     meta["time_window_s"] = float(min(max(2.2 * (sc.soil_depth_m + 0.12) / _v + 3e-9, 1.0e-8), 2.2e-8))
     host_coupling = {"realistic_prob": realistic_host_prob, "drawn_realistic": drawn_realistic,
-                     "decorrelated": not drawn_realistic, "natural_hosts": natural}
+                     "decorrelated": not drawn_realistic, "natural_hosts": natural,
+                     "shape_realistic": shape_realistic}   # Step 4: None=N/A, else shape<->soil draw
     # Heterogeneous background soil: a correlated random eps_r field (realistic clutter).
     het = {"eps_spread_frac": 0.12, "correlation_length_m": float(rng.uniform(0.06, 0.15)),
            "n_levels": 9, "seed": seed}
