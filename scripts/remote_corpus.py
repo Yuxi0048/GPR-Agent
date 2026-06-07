@@ -132,10 +132,74 @@ def _gssi_scene(rng, rrp):
     mat_lines = [f"#material: {e:.4g} {s:.5g} 1 0 {nm}" for nm, (e, s) in mats.items()]
     meta = {"tier": "M", "scale": "gssi3d", "family": "gssi_400", "coupling": "ground_coupled",
             "antenna": "gssi_400", "fc_hz": 4.0e8, "dx_m": GSSI_RES, "tx_rx_offset_m": 0.0,
+            "host_eps_r": round(HOSTS_3D[host][0], 3),
             "note": f"gssi_400 3D: {host}, {len([o for o in objs if o['kind']=='pipe'])} pipes",
             "correlation_sampled": [], "scan_step_m": step}
     return {"Dx": Dx, "Dy": Dy, "Dz": Dz, "surf_z": surf_z, "mat_lines": mat_lines, "cmds": cmds,
             "objs": objs, "host": host, "x0": x0, "step": step, "n_traces": n_traces, "tw": tw,
+            "realistic": realistic, "meta": meta}
+
+
+def _gssi_tu1208_scene(rng, rrp):
+    """A TU1208-like 3-D scene for the GSSI-400 antenna: a pit + THREE depth layers of pipes BY TYPE
+    (steel shallow / water-PVC mid / empty-PVC deep -- the TU1208 layering) + an optional polystyrene
+    cavity + an optional gneiss block, in a limestone host (eps~6). Feasible GSSI domain (~1.6x1.35x0.4 m).
+    Returns the same prep-style dict as _gssi_scene."""
+    LIMESTONE = (6.0, 0.005)                                          # TU1208 host eps ~ 6
+    Dy = 0.40
+    Dx = float(rng.uniform(1.4, 1.8)); depth = float(rng.uniform(1.15, 1.5))
+    surf_z = round(depth, 3); Dz = round(surf_z + 0.30, 3)
+    realistic = bool(rng.random() < rrp)
+    mats = {"limestone": LIMESTONE}
+    cmds = [f"#box: 0 0 0 {Dx:.3f} {Dy:.3f} {surf_z:.3f} limestone"]
+    objs = []
+    pcx = Dx / 2; top_w = float(rng.uniform(Dx * 0.72, Dx * 0.92))    # the pit (backfill box ~ trapezoidal)
+    pit_d = float(rng.uniform(0.85, min(1.1, depth - 0.2)))
+    bf = str(rng.choice(["dry_sand", "silt"])); mats[bf] = HOSTS_3D[bf]
+    cmds.append(f"#box: {pcx-top_w/2:.3f} 0 {surf_z-pit_d:.3f} {pcx+top_w/2:.3f} {Dy:.3f} {surf_z:.3f} {bf}")
+    objs.append({"kind": "trench_backfill", "material": bf, "conductor": False, "center_x_m": round(pcx, 3),
+                 "depth_m": round(pit_d / 2, 3), "radius_m": round(top_w / 2, 3)})
+    mats["pvc"] = MAT_3D["pvc"]; mats["water"] = MAT_3D["water"]
+    for code, base in [("metal", rng.uniform(0.30, 0.42)), ("pvc_water", rng.uniform(0.58, 0.74)),
+                       ("pvc_empty", rng.uniform(0.90, 1.05))]:        # 3 TU1208 layers, 1-3 pipes each
+        pzd = float(min(base, depth - 0.12))
+        for x in np.linspace(pcx - top_w / 2 + 0.18, pcx + top_w / 2 - 0.18, int(rng.integers(1, 4))):
+            px = float(np.clip(x + rng.uniform(-0.04, 0.04), 0.25, Dx - 0.25)); pz = surf_z - pzd
+            r = float(rng.uniform(0.03, 0.06))
+            if code == "metal":
+                cmds.append(f"#cylinder: {px:.3f} 0 {pz:.3f} {px:.3f} {Dy:.3f} {pz:.3f} {r:.3f} pec")
+                objs.append({"kind": "pipe", "material": "steel", "ptype": "metal", "fill": "none", "conductor": True,
+                             "center_x_m": round(px, 3), "depth_m": round(pzd, 3), "radius_m": round(r, 3), "tu1208_layer": code})
+            else:
+                water = code == "pvc_water"
+                cmds.append(f"#cylinder: {px:.3f} 0 {pz:.3f} {px:.3f} {Dy:.3f} {pz:.3f} {r:.3f} pvc")
+                cmds.append(f"#cylinder: {px:.3f} 0 {pz:.3f} {px:.3f} {Dy:.3f} {pz:.3f} {r*0.6:.3f} {'water' if water else 'free_space'}")
+                objs.append({"kind": "pipe", "material": "pvc", "fill": "water" if water else "air",
+                             "ptype": "water_filled_plastic" if water else "empty_plastic", "conductor": False,
+                             "center_x_m": round(px, 3), "depth_m": round(pzd, 3), "radius_m": round(r, 3), "tu1208_layer": code})
+    if rng.random() < 0.55:                                            # polystyrene cavity (TU1208 has one)
+        vx = float(rng.uniform(0.3, Dx - 0.3)); vzd = float(rng.uniform(0.4, depth - 0.2)); vr = float(rng.uniform(0.07, 0.13))
+        cmds.append(f"#sphere: {vx:.3f} {Dy/2:.3f} {surf_z-vzd:.3f} {vr:.3f} free_space")
+        objs.append({"kind": "polystyrene_cavity", "material": "air", "shape": "sphere", "cavity_type": "polystyrene_cavity",
+                     "conductor": False, "center_x_m": round(vx, 3), "depth_m": round(vzd, 3), "radius_m": round(vr, 3)})
+    if rng.random() < 0.4:                                             # gneiss block (TU1208 blocks)
+        mats["gneiss"] = (9.0, 0.005)
+        gx = float(rng.uniform(0.3, Dx - 0.3)); gzd = float(rng.uniform(0.55, depth - 0.2)); gw = float(rng.uniform(0.10, 0.20))
+        cmds.append(f"#box: {gx-gw/2:.3f} {Dy/2-gw/2:.3f} {surf_z-gzd-gw/2:.3f} {gx+gw/2:.3f} {Dy/2+gw/2:.3f} {surf_z-gzd+gw/2:.3f} gneiss")
+        objs.append({"kind": "gneiss_block", "material": "gneiss", "conductor": False,
+                     "center_x_m": round(gx, 3), "depth_m": round(gzd, 3), "radius_m": round(gw / 2, 3)})
+    v = 0.3 / max(LIMESTONE[0], 1.0) ** 0.5
+    tw = float(min(5.0e-8, (2.2 * depth / v + 6.0) * 1e-9))
+    x0, x1, step = 0.20, Dx - 0.20, 0.04
+    n_traces = max(10, int((x1 - x0) / step) + 1)
+    mat_lines = [f"#material: {e:.4g} {sg:.5g} 1 0 {nm}" for nm, (e, sg) in mats.items()]
+    meta = {"tier": "M", "scale": "gssi3d", "family": "gssi_400_tu1208", "coupling": "ground_coupled",
+            "antenna": "gssi_400", "fc_hz": 4.0e8, "dx_m": GSSI_RES, "tx_rx_offset_m": 0.0,
+            "host_eps_r": round(LIMESTONE[0], 3),
+            "note": "gssi_400 TU1208-like: limestone, 3 pipe layers (steel/water-PVC/empty-PVC)",
+            "correlation_sampled": [], "scan_step_m": step}
+    return {"Dx": Dx, "Dy": Dy, "Dz": Dz, "surf_z": surf_z, "mat_lines": mat_lines, "cmds": cmds,
+            "objs": objs, "host": "limestone", "x0": x0, "step": step, "n_traces": n_traces, "tw": tw,
             "realistic": realistic, "meta": meta}
 
 
@@ -156,11 +220,11 @@ def _gssi_deck(s, sx):
     ]) + "\n"
 
 
-def _prepare_one(idx, s, rrp, gssi_frac, out):
+def _prepare_one(idx, s, rrp, gssi_frac, out, tu1208_gssi=False):
     """Prepare one scene (decks + prep.json). Returns True if a scene was written, False if skipped."""
     srng = np.random.default_rng(s)
-    if srng.random() < gssi_frac:                             # GSSI-400 3-D realism subset (real antenna)
-        gs = _gssi_scene(srng, rrp)
+    if tu1208_gssi or srng.random() < gssi_frac:              # GSSI-400 3-D realism subset (real antenna)
+        gs = _gssi_tu1208_scene(srng, rrp) if tu1208_gssi else _gssi_scene(srng, rrp)
         gr = geometry_in_domain([_obj_extents(o) for o in gs["objs"]], width_m=gs["Dx"], depth_m=gs["surf_z"])
         if not gr["all_inside"]:                              # validator gate: no out-of-domain geometry
             print(f"  GEOM FAIL {idx} (gssi): {gr['issues'][:2]}"); return False
@@ -220,67 +284,75 @@ def _prepare_one(idx, s, rrp, gssi_frac, out):
     return True
 
 
-def prepare(n, seed, rhp, rrp, out, gssi_frac=0.3):
+def prepare(n, seed, rhp, rrp, out, gssi_frac=0.3, tu1208_gssi=False):
     out = Path(out); out.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed); made = 0
     for idx in range(n):
         s = int(rng.integers(0, 2**31 - 1))
         try:                                                  # isolate every scene -- one failure can't abort the run
-            if _prepare_one(idx, s, rrp, gssi_frac, out):
+            if _prepare_one(idx, s, rrp, gssi_frac, out, tu1208_gssi=tu1208_gssi):
                 made += 1
         except Exception as e:
             print(f"  FAIL idx={idx}: {type(e).__name__}: {str(e)[:160]}")
     print(f"PREPARE_DONE made={made} out={out}")
 
 
+def _assemble_one(d, OUT, h5py):
+    """Assemble one prepared scene from its t*.out into the corpus. Returns 1 if done, 0 if skipped."""
+    pj = json.loads((d / "prep.json").read_text())
+    nt = pj["n_traces"]; sol = {}; dt = None; comp = pj.get("component", "Ez")   # GSSI-400 outputs Ey
+    for k in range(nt):
+        o = d / f"t{k:03d}.out"
+        if not o.exists():
+            continue
+        with h5py.File(o, "r") as f:
+            dt = float(f.attrs["dt"]); sol[k] = np.asarray(f["rxs"]["rx1"][comp], float)
+    if len(sol) < 0.9 * nt:                                       # need most traces; else not worth assembling
+        print(f"  skip {d.name}: only {len(sol)}/{nt} traces solved"); return 0
+    ns = len(next(iter(sol.values()))); b = np.zeros((ns, nt))
+    for k, tr in sol.items():
+        b[:, k] = tr
+    if len(sol) < nt:                                             # pad the few missing with a neighbour
+        for k in range(nt):
+            if k not in sol:
+                b[:, k] = b[:, k - 1] if k > 0 else b[:, k + 1]
+        print(f"  {d.name}: padded {nt - len(sol)} missing trace(s)")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    sd = OUT / f"composite_{ts}_{d.name[-5:]}"; sd.mkdir(parents=True, exist_ok=True)
+    np.save(sd / "bscan.npy", b)
+    for fn in ("geometry.h5", "materials.txt", "model.png", "card.json"):
+        if (d / fn).exists():
+            (sd / fn).write_bytes((d / fn).read_bytes())
+    G._save_preview(sd / "bscan.png", b)
+    meta = pj["meta"]; dx = meta["dx_m"]
+    labels = {"scene_type": GC.SCENE_TYPE, "tier": meta["tier"], "scale": meta["scale"], "family": meta.get("family"),
+              "coupling": meta["coupling"], "antenna": meta["antenna"], "host_material": pj["host"],
+              "host_eps_r": meta.get("host_eps_r"), "scene_composition": pj["scene_composition"],
+              "realistic_relation": pj["realistic_relation"], "correlation_sampled": meta.get("correlation_sampled", []),
+              "objects": pj["objects"], "note": meta["note"],
+              "acquisition": {"fc_hz": meta["fc_hz"], "n_traces": nt, "dx_m": dx, "dt_ns": dt * 1e9,
+                              "time_window_s": pj["tw_s"], "scan_start_m": pj["scan_start"],
+                              "scan_step_m": pj["scan_step"], "scene_width_m": pj["width"], "depth_m": pj["depth"]},
+              "bscan_shape": list(b.shape), "material_order": pj["material_order"], "solve": "remote_gpu_a100"}
+    (sd / "labels.json").write_text(json.dumps(labels, indent=2), encoding="utf-8")
+    with (G.OUT_ROOT / "manifest.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"dir": str(sd.relative_to(G.OUT_ROOT)), "scene_type": GC.SCENE_TYPE, "tier": meta["tier"],
+                            "scale": meta["scale"], "family": meta.get("family"), "coupling": meta["coupling"],
+                            "n_objects": len(pj["objects"]), "scene_composition": pj["scene_composition"],
+                            "host": pj["host"], "realistic_relation": pj["realistic_relation"],
+                            "bscan_shape": list(b.shape), "solve": "remote_gpu_a100", "created_at": ts}) + "\n")
+    print(f"ASSEMBLE {d.name} -> {sd.name}  bscan {b.shape}")
+    return 1
+
+
 def assemble(out):
     import h5py
     out = Path(out); OUT = G.OUT_ROOT / GC.SCENE_TYPE; OUT.mkdir(parents=True, exist_ok=True); done = 0
     for d in sorted(out.glob("scene_*")):
-        pj = json.loads((d / "prep.json").read_text())
-        nt = pj["n_traces"]; sol = {}; dt = None; comp = pj.get("component", "Ez")   # GSSI-400 outputs Ey
-        for k in range(nt):
-            o = d / f"t{k:03d}.out"
-            if not o.exists():
-                continue
-            with h5py.File(o, "r") as f:
-                dt = float(f.attrs["dt"]); sol[k] = np.asarray(f["rxs"]["rx1"][comp], float)
-        if len(sol) < 0.9 * nt:                                   # need most traces; else not worth assembling
-            print(f"  skip {d.name}: only {len(sol)}/{nt} traces solved"); continue
-        ns = len(next(iter(sol.values()))); b = np.zeros((ns, nt))
-        for k, tr in sol.items():
-            b[:, k] = tr
-        if len(sol) < nt:                                         # pad the few missing with a neighbour
-            for k in range(nt):
-                if k not in sol:
-                    b[:, k] = b[:, k - 1] if k > 0 else b[:, k + 1]
-            print(f"  {d.name}: padded {nt - len(sol)} missing trace(s)")
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-        sd = OUT / f"composite_{ts}_{d.name[-5:]}"; sd.mkdir(parents=True, exist_ok=True)
-        np.save(sd / "bscan.npy", b)
-        for fn in ("geometry.h5", "materials.txt", "model.png", "card.json"):
-            if (d / fn).exists():
-                (sd / fn).write_bytes((d / fn).read_bytes())
-        G._save_preview(sd / "bscan.png", b)
-        meta = pj["meta"]; dx = meta["dx_m"]
-        labels = {"scene_type": GC.SCENE_TYPE, "tier": meta["tier"], "scale": meta["scale"], "family": meta.get("family"),
-                  "coupling": meta["coupling"], "antenna": meta["antenna"], "host_material": pj["host"],
-                  "host_eps_r": meta["host_eps_r"], "scene_composition": pj["scene_composition"],
-                  "realistic_relation": pj["realistic_relation"], "correlation_sampled": meta["correlation_sampled"],
-                  "objects": pj["objects"], "note": meta["note"],
-                  "acquisition": {"fc_hz": meta["fc_hz"], "n_traces": nt, "dx_m": dx, "dt_ns": dt * 1e9,
-                                  "time_window_s": pj["tw_s"], "scan_start_m": pj["scan_start"],
-                                  "scan_step_m": pj["scan_step"], "scene_width_m": pj["width"]},
-                  "bscan_shape": list(b.shape), "material_order": pj["material_order"], "solve": "remote_gpu_a100"}
-        (sd / "labels.json").write_text(json.dumps(labels, indent=2), encoding="utf-8")
-        with (G.OUT_ROOT / "manifest.jsonl").open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"dir": str(sd.relative_to(G.OUT_ROOT)), "scene_type": GC.SCENE_TYPE, "tier": meta["tier"],
-                                "scale": meta["scale"], "family": meta.get("family"), "coupling": meta["coupling"],
-                                "n_objects": len(pj["objects"]), "scene_composition": pj["scene_composition"],
-                                "host": pj["host"], "realistic_relation": pj["realistic_relation"],
-                                "bscan_shape": list(b.shape), "solve": "remote_gpu_a100", "created_at": ts}) + "\n")
-        done += 1
-        print(f"ASSEMBLE {d.name} -> {sd.name}  bscan {b.shape}")
+        try:
+            done += _assemble_one(d, OUT, h5py)
+        except Exception as e:
+            print(f"  ASSEMBLE FAIL {d.name}: {type(e).__name__}: {str(e)[:140]}")
     print(f"ASSEMBLE_DONE n={done}")
 
 
@@ -292,10 +364,12 @@ def main():
     ap.add_argument("--realistic-host-prob", type=float, default=1.0)
     ap.add_argument("--realistic-relation-prob", type=float, default=0.7)
     ap.add_argument("--gssi-frac", type=float, default=0.3, help="fraction of scenes using the GSSI-400 3-D antenna")
+    ap.add_argument("--gssi-tu1208", action="store_true", help="TU1208-like GSSI scenes (3 pipe layers + pit + cavity)")
     ap.add_argument("--out", type=Path, required=True)
     a = ap.parse_args()
     if a.mode == "prepare":
-        prepare(a.n, a.seed, a.realistic_host_prob, a.realistic_relation_prob, a.out, gssi_frac=a.gssi_frac)
+        prepare(a.n, a.seed, a.realistic_host_prob, a.realistic_relation_prob, a.out,
+                gssi_frac=a.gssi_frac, tu1208_gssi=a.gssi_tu1208)
     else:
         assemble(a.out)
 
