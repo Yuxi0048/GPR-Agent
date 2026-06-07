@@ -148,20 +148,20 @@ def build_composite_corridor(rng, host_soil=None, realistic_relation=True):
 
     if is_tu:                                                      # TU1208: rock host, large trapezoidal pit
         soil = host_soil or str(rng.choice(["granite", "dry_limestone", "moist_limestone"]))
-        large = True; W = float(rng.uniform(12.0, 20.0)); D = float(rng.uniform(3.2, 4.2)); dx = DX_L_M
+        large = True; W = float(rng.uniform(12.0, 20.0)); D = float(rng.uniform(3.2, 4.2)); dx = round(float(rng.uniform(0.008, 0.014)), 4)   # vary dx (=> dt, n_samples vary)
         pit_frac = float(rng.uniform(0.6, 0.85))
     elif is_pav:                                                  # pavement: shallow, over a sandy subgrade
         soil = host_soil or "dry_sand"
-        large = False; W = float(rng.uniform(4.0, 8.0)); D = float(rng.uniform(1.6, 2.4)); dx = 0.006
+        large = False; W = float(rng.uniform(4.0, 8.0)); D = float(rng.uniform(1.6, 2.4)); dx = round(float(rng.uniform(0.004, 0.008)), 4)   # vary dx (=> dt, n_samples vary)
         pit_frac = float(rng.uniform(0.25, 0.5))
     else:                                                          # excavation / geological -- scale-matched canvas
         large = bool(rng.random() < 0.45)
         soil = host_soil or str(rng.choice(G.SOILS))
         if large:
-            W = float(rng.uniform(10.0, 18.0)); D = float(rng.uniform(3.0, 4.0)); dx = DX_L_M
+            W = float(rng.uniform(10.0, 18.0)); D = float(rng.uniform(3.0, 4.0)); dx = round(float(rng.uniform(0.008, 0.014)), 4)   # vary dx (=> dt, n_samples vary)
             pit_frac = float(rng.uniform(0.5, 0.78))
         else:
-            W = float(rng.uniform(3.5, 6.5)); D = float(rng.uniform(1.8, 2.8)); dx = 0.006
+            W = float(rng.uniform(3.5, 6.5)); D = float(rng.uniform(1.8, 2.8)); dx = round(float(rng.uniform(0.004, 0.008)), 4)   # vary dx (=> dt, n_samples vary)
             pit_frac = float(rng.uniform(0.3, 0.6))
     sc = G.S.Scene(width_m=W, soil_depth_m=D, dx_m=dx, soil_material=soil)
     # COUPLING: the antenna sits in the air gap -> air_gap_m sets ground-coupled vs air-launched.
