@@ -21,6 +21,7 @@ import corpus_domain as CD
 import generate_composite_corpus as GC
 import generate_subsurface_corpus as G
 from gpr_agent.sim_scenes import _deck_single
+from subsurface_platform.domain import survey_in_domain   # GPR-Sim acquisition preflight
 
 
 def _acquisition(sc, objs, meta):
@@ -40,7 +41,16 @@ def _acquisition(sc, objs, meta):
                            int(pre.get("recommended_n_traces", n_traces)))
             scan_step = (scan_end - scan_start) / max(n_traces - 1, 1)
             tw_s = float(min(meta["tw_cap_s"], max(tw_s, pre["recommended_time_window_ns"] * 1e-9 * 1.1)))
-    return scan_start, scan_step, n_traces, tw_s
+    # DOMAIN preflight (GPR-Sim): keep every source + receiver inside the FDTD domain (the bug that
+    # bit scene_00002). Auto-correct n_traces from the report, then re-check.
+    dom_h = sc.soil_depth_m + sc.air_gap_m; ant_y = sc.soil_depth_m + 0.5 * sc.air_gap_m
+    pf = dict(scan_x_min_m=scan_start, scan_step_m=scan_step, tx_rx_offset_m=meta["tx_rx_offset_m"],
+              antenna_y_m=ant_y, domain_w_m=sc.width_m, domain_h_m=dom_h, edge_margin_m=0.02)
+    rep = survey_in_domain(n_traces=n_traces, **pf)
+    if not rep["all_inside"]:
+        n_traces = rep["recommended_n_traces"]
+        rep = survey_in_domain(n_traces=n_traces, **pf)
+    return scan_start, scan_step, n_traces, tw_s, rep
 
 
 def prepare(n, seed, rhp, rrp, out):
@@ -58,7 +68,9 @@ def prepare(n, seed, rhp, rrp, out):
         sc.soil_material = host; meta["host_material"] = host; meta["host_eps_r"] = round(G._eps(host), 3)
         sc.soil_heterogeneity = {"eps_spread_frac": 0.10, "correlation_length_m": float(srng.uniform(0.1, 0.25)),
                                  "n_levels": 9, "seed": s}
-        scan_start, scan_step, n_traces, tw_s = _acquisition(sc, objs, meta)
+        scan_start, scan_step, n_traces, tw_s, pf = _acquisition(sc, objs, meta)
+        if not pf["all_inside"]:                              # preflight gate: never ship an invalid deck
+            print(f"  PREFLIGHT FAIL {idx}: {pf['issues']}"); continue
         d = out / f"scene_{idx:05d}"; d.mkdir(exist_ok=True)
         geo, mats, order = sc.write_gprmax(d)
         for k in range(n_traces):
@@ -82,7 +94,7 @@ def prepare(n, seed, rhp, rrp, out):
             {"n_traces": n_traces, "scan_start": scan_start, "scan_step": scan_step, "fc_hz": meta["fc_hz"],
              "tw_s": tw_s, "host": host, "width": sc.width_m, "depth": sc.soil_depth_m, "meta": meta,
              "objects": objs, "material_order": order, "scene_composition": comp, "n_relations": rels,
-             "realistic_relation": rr}, default=str, indent=2), encoding="utf-8")
+             "realistic_relation": rr, "preflight": pf}, default=str, indent=2), encoding="utf-8")
         made += 1
         print(f"PREP {idx:02d} {meta.get('family','?'):10s} {meta['scale']:10s} host={host:14s} "
               f"traces={n_traces:3d} -> {d.name}")
