@@ -32,8 +32,10 @@ import numpy as np
 
 import corpus_domain as CD
 import generate_subsurface_corpus as G          # scene API + helpers (_obj/_meta/_eps/_coverage/...)
+from subsurface_platform.domain.host_correlation import correlated_shape_for
 from subsurface_platform.domain.object_correlation import (
     CLUTTER_COMPANIONS, Arrangement, sample_companions)
+from subsurface_platform.domain.scenario_relation import ScenarioRelationType
 
 SCENE_TYPE = "composite_corridor"
 SCAN_STEP_L_M = 0.05            # coarser line spacing for 250 MHz (anti-alias-checked below)
@@ -42,86 +44,120 @@ TW_CAP_L_S = 1.5e-7            # up to 150 ns (deep scene)
 
 
 def build_composite_corridor(rng, host_soil=None, realistic_relation=True):
-    """A large multi-object utility corridor; presence + arrangement from object_correlation."""
+    """A TU1208-class scene: a WIDE backfilled pit spanning most of the width, with utilities in
+    2-3 LAYERS inside it, and blocks/cavities in the surrounding host. Object presence + layered
+    arrangement come from object_correlation (strength-gated); the pit wall shape is host-correlated."""
     soil = host_soil or str(rng.choice(G.SOILS))
-    W = float(rng.uniform(12.0, 20.0)); D = float(rng.uniform(3.0, 4.5))
-    sc = G.S.Scene(width_m=W, soil_depth_m=D, dx_m=DX_L_M, soil_material=soil)
+    # SCALE: size the canvas to the content -- a large excavation gets a large canvas; small utilities
+    # get a small one (no point imaging a 0.6 m trench across 18 m).
+    large = bool(rng.random() < 0.4)
+    if large:
+        W = float(rng.uniform(10.0, 18.0)); D = float(rng.uniform(3.0, 4.0)); dx = DX_L_M
+        pit_frac = float(rng.uniform(0.55, 0.80))
+    else:
+        W = float(rng.uniform(3.0, 6.0)); D = float(rng.uniform(1.6, 2.6)); dx = 0.006
+        pit_frac = float(rng.uniform(0.30, 0.60))
+    sc = G.S.Scene(width_m=W, soil_depth_m=D, dx_m=dx, soil_material=soil)
+    # COUPLING: the antenna sits in the air gap -> air_gap_m sets ground-coupled vs air-launched.
+    air_launched = bool(rng.random() < 0.3)
+    sc.air_gap_m = float(rng.uniform(0.25, 0.5)) if air_launched else float(rng.uniform(0.02, 0.06))
+    coupling = "air_launched" if air_launched else "ground_coupled"
+    # ANTENNA: the 2-D corpus uses a hertzian dipole; vary fc by scale + the Tx-Rx offset. (The 3-D
+    # MALA antenna is a separate ~50-100x slower path -- temp_src/run_mala_3d.py -- not generated here.)
+    fc = 2.5e8 if large else float(rng.choice([5.0e8, 8.0e8])); tx_rx_offset = round(float(rng.uniform(0.04, 0.18)), 3)
     objs: list[dict] = []
     notes: list[str] = []
-    sampled: list[dict] = []                                   # correlation provenance
+    sampled: list[dict] = []
 
     def _record(anchor, companion, relation, arr):
         sampled.append({"anchor": anchor, "companion": companion,
                         "relation": relation.value, "arrangement": arr.value})
 
-    # --- primary: a utility trench with bedded pipe(s) (TRENCH_FLOOR arrangement) ---
-    backfill = str(rng.choice(["dry_sand", "gravel", "silt"]))
-    tw_ = float(rng.uniform(0.8, 1.4)); tcx = float(rng.uniform(2.0, W * 0.45)); tbot = float(rng.uniform(1.2, 2.2))
-    sc.add_box(x_min_m=tcx - tw_ / 2, x_max_m=tcx + tw_ / 2, depth_top_m=0.0, depth_bottom_m=tbot,
-               material=backfill, name="trench_backfill")
-    objs.append(G._obj("trench_backfill", backfill,
-                       box={"x_min": tcx - tw_ / 2, "x_max": tcx + tw_ / 2, "depth_top": 0.0, "depth_bottom": tbot}))
-    for companion, relation, n, arr in sample_companions("utility_trench", rng, realistic=realistic_relation):
-        if companion != "pipe":
-            continue
-        _record("utility_trench", companion, relation, arr)
-        for _ in range(n):
-            mat = str(rng.choice(["pvc", "steel", "cast_iron", "concrete"])); r = float(rng.uniform(0.04, 0.08))
-            if arr is Arrangement.TRENCH_FLOOR:
-                px = float(rng.uniform(tcx - tw_ / 2 + 0.15, tcx + tw_ / 2 - 0.15)); pz = tbot - float(rng.uniform(0.1, 0.3))
-            else:                                              # decorrelated -> anywhere
-                px = float(rng.uniform(1.0, W - 1.0)); pz = float(rng.uniform(0.5, D - 0.5))
-            sc.add_pipe(center_x_m=px, depth_m=pz, radius_m=r, material=mat)
-            objs.append(G._obj("pipe", mat, x=px, depth=pz, radius=r))
-    notes.append(f"trench({backfill})")
+    # --- wide backfilled excavation spanning most of the width; wall shape host-correlated ---
+    backfill = str(rng.choice(["dry_sand", "gravel", "silt", "moist_limestone"]))
+    pit_w = pit_frac * W
+    pit_cx = float(np.clip(W / 2 + rng.uniform(-0.08, 0.08) * W, pit_w / 2 + 0.3, W - pit_w / 2 - 0.3))
+    pit_bot = float(rng.uniform(min(1.2, D - 0.6), D - 0.3)); htop = pit_w / 2
+    shape = correlated_shape_for("utility_trench", soil, rng, realistic=realistic_relation)   # OSHA/EC7
+    if shape == "box":
+        hbot = htop
+        sc.add_box(x_min_m=pit_cx - htop, x_max_m=pit_cx + htop, depth_top_m=0.0, depth_bottom_m=pit_bot,
+                   material=backfill, name="trench_backfill")
+        objs.append(G._obj("trench_backfill", backfill,
+                           box={"x_min": pit_cx - htop, "x_max": pit_cx + htop, "depth_top": 0.0, "depth_bottom": pit_bot}))
+    else:                                                          # trapezoid / v: sloped walls (TU1208-like)
+        hbot = htop * float(rng.uniform(0.55, 0.8))
+        corners = [(pit_cx - htop, 0.0), (pit_cx + htop, 0.0), (pit_cx + hbot, pit_bot), (pit_cx - hbot, pit_bot)]
+        sc.add_polygon(corners_xz=corners, material=backfill, name="trench_backfill")
+        objs.append(G._obj("trench_backfill", backfill, polygon=corners,
+                           box={"x_min": pit_cx - htop, "x_max": pit_cx + htop, "depth_top": 0.0, "depth_bottom": pit_bot}))
+    notes.append(f"{shape} pit {pit_w:.0f}m ({backfill})")
 
-    # --- secondary: a parallel-conduit duct bank in another lateral location / depth band ---
-    if rng.random() < 0.85:
-        cols = int(rng.integers(2, 6)); cw = 0.12; bw = cols * cw + 0.08; bh = 0.25
-        dcx = float(rng.uniform(W * 0.55, W - bw / 2 - 1.0)); dtop = float(rng.uniform(0.6, 1.6))
-        sc.add_box(x_min_m=dcx - bw / 2, x_max_m=dcx + bw / 2, depth_top_m=dtop, depth_bottom_m=dtop + bh,
-                   material="concrete", name="duct_bank_envelope")
-        objs.append(G._obj("duct_bank_envelope", "concrete",
-                           box={"x_min": dcx - bw / 2, "x_max": dcx + bw / 2, "depth_top": dtop, "depth_bottom": dtop + bh}))
-        for companion, relation, n, arr in sample_companions("duct_bank_envelope", rng, realistic=realistic_relation):
-            if companion != "conduit":
+    def _halfwidth_at(z):                                          # pit half-width at depth z (wall taper)
+        return htop + (hbot - htop) * (z / pit_bot)
+
+    # --- utilities in 2-3 LAYERS inside the pit (trench->pipe co-occurrence; layered arrangement) ---
+    comps = sample_companions("utility_trench", rng, realistic=realistic_relation)   # provenance + extras
+    if True:                                                  # the excavation is dug FOR utilities -> always present
+        rel0 = next((r for c, r, *_ in comps if c == "pipe"), ScenarioRelationType.SPATIAL_CONTAINED_IN)
+        n_layers = int(rng.integers(2, 4)) if large else int(rng.integers(1, 3))
+        layer_depths = [0.3 + (pit_bot - 0.45) * (li + 0.5) / n_layers for li in range(n_layers)]
+        duct_layer = int(rng.integers(0, n_layers)) if rng.random() < 0.5 else -1   # one layer may be a duct bank
+        for li, lz in enumerate(layer_depths):
+            hw = _halfwidth_at(lz) * 0.82
+            n_in = int(rng.integers(2, 5))
+            if li == duct_layer:                                  # a duct bank: concrete envelope + parallel conduits
+                bw = float(min(2 * hw, 0.18 * n_in + 0.1)); dcx = pit_cx + float(rng.uniform(-0.3, 0.3)) * hw
+                sc.add_box(x_min_m=dcx - bw / 2, x_max_m=dcx + bw / 2, depth_top_m=lz - 0.12, depth_bottom_m=lz + 0.12,
+                           material="concrete", name="duct_bank_envelope")
+                objs.append(G._obj("duct_bank_envelope", "concrete",
+                                   box={"x_min": dcx - bw / 2, "x_max": dcx + bw / 2, "depth_top": lz - 0.12, "depth_bottom": lz + 0.12}))
+                _record("duct_bank_envelope", "conduit", Arrangement.PARALLEL_BAND, Arrangement.PARALLEL_BAND)
+                cmat = str(rng.choice(["pvc", "air"]))
+                for j in range(n_in):
+                    ox = (dcx - bw / 2 + 0.05 + (bw - 0.1) * (j + 0.5) / n_in) if realistic_relation else (dcx + float(rng.uniform(-hw, hw)))
+                    sc.add_void(center_x_m=float(ox), depth_m=lz, radius_m=0.035, material=cmat)
+                    objs.append(G._obj("conduit", cmat, x=float(ox), depth=lz, radius=0.035))
+                notes.append(f"ductbank L{li}({n_in})")
                 continue
-            _record("duct_bank_envelope", companion, relation, arr)
-            cmat = str(rng.choice(["pvc", "air"]))
-            for i in range(n):
-                if arr is Arrangement.PARALLEL_BAND:
-                    ox = dcx - bw / 2 + 0.06 + i * (bw - 0.12) / max(n - 1, 1); oz = dtop + bh / 2
-                else:
-                    ox = float(rng.uniform(1.0, W - 1.0)); oz = float(rng.uniform(0.5, D - 0.5))
-                sc.add_void(center_x_m=ox, depth_m=oz, radius_m=0.04, material=cmat)
-                objs.append(G._obj("conduit", cmat, x=ox, depth=oz, radius=0.04))
-        notes.append(f"ductbank({cols})")
+            mat = str(rng.choice(["steel", "cast_iron", "pvc", "hdpe", "concrete"]))
+            for j in range(n_in):                                 # a parallel row of pipes (one layer)
+                if realistic_relation:
+                    px = pit_cx - hw + (2 * hw) * (j + 0.5) / n_in; pz = lz + float(rng.uniform(-0.05, 0.05))
+                else:                                             # decorrelated -> scattered depth/x within the pit
+                    px = pit_cx + float(rng.uniform(-hw, hw)); pz = float(rng.uniform(0.5, pit_bot - 0.15))
+                r = float(rng.uniform(0.04, 0.08))
+                sc.add_pipe(center_x_m=float(px), depth_m=float(pz), radius_m=r, material=mat)
+                objs.append(G._obj("pipe", mat, x=float(px), depth=float(pz), radius=r))
+                if mat in ("pvc", "hdpe", "concrete") and rng.random() < 0.5:    # empty pipe -> inner air
+                    sc.add_void(center_x_m=float(px), depth_m=float(pz), radius_m=r * 0.65, material="air")
+                    objs.append(G._obj("pipe_void", "air", x=float(px), depth=float(pz), radius=r * 0.65))
+        _record("utility_trench", "pipe", rel0, Arrangement.TRENCH_FLOOR if realistic_relation else Arrangement.SCATTER)
+        notes.append(f"{n_layers} pipe layers")
 
-    # --- deep band: a crossing / deep service ---
-    if rng.random() < 0.6:
-        mat = str(rng.choice(["steel", "cast_iron", "pvc"])); r = float(rng.uniform(0.05, 0.09))
-        px = float(rng.uniform(2.0, W - 2.0)); pz = float(rng.uniform(2.4, D - 0.4))
-        sc.add_pipe(center_x_m=px, depth_m=pz, radius_m=r, material=mat)
-        objs.append(G._obj("pipe", mat, x=px, depth=pz, radius=r))
-        notes.append("deep_service")
-
-    # --- host clutter (a couple of boulders / voids) ---
-    for _ in range(int(rng.integers(0, 3))):
-        ck = str(rng.choice(CLUTTER_COMPANIONS))
-        x = float(rng.uniform(1.0, W - 1.0)); z = float(rng.uniform(0.5, D - 0.5))
-        if ck == "boulder":
-            rock = str(rng.choice(["granite", "limestone"])); rr = float(rng.uniform(0.06, 0.15))
+    # --- surrounding host clutter OUTSIDE the pit (gneiss blocks / cavities, TU1208-like) ---
+    for _ in range(int(rng.integers(1, 4)) if large else int(rng.integers(0, 2))):
+        spans = [s for s in ((0.6, pit_cx - htop - 0.6), (pit_cx + htop + 0.6, W - 0.6)) if s[1] - s[0] > 0.5]
+        if not spans:
+            break
+        s = spans[int(rng.integers(0, len(spans)))]
+        x = float(rng.uniform(*s)); z = float(rng.uniform(0.5, D - 0.5))
+        if rng.random() < 0.6:
+            rock = str(rng.choice(["granite", "limestone"])); rr = float(rng.uniform(0.08, 0.18))
             sc.add_pipe(center_x_m=x, depth_m=z, radius_m=rr, material=rock)
             objs.append(G._obj("boulder", rock, x=x, depth=z, radius=rr, ambiguity=True))
-        elif ck == "generic_void":
-            rr = float(rng.uniform(0.08, 0.2))
+        else:
+            rr = float(rng.uniform(0.1, 0.22))
             sc.add_void(center_x_m=x, depth_m=z, radius_m=rr, material="air")
             objs.append(G._obj("generic_void", "air", x=x, depth=z, radius=rr, ambiguity=True))
 
-    meta = G._meta(SCENE_TYPE, soil, D, fc=2.5e8, n_traces=0, note="corridor: " + ", ".join(notes))
+    meta = G._meta(SCENE_TYPE, soil, D, fc=fc, n_traces=0, note="corridor: " + ", ".join(notes))
     v = 3e8 / math.sqrt(max(G._eps(soil), 1.0))
-    meta.update(tier="L", dx_m=DX_L_M, scan_step_m=SCAN_STEP_L_M, tw_cap_s=TW_CAP_L_S,
-                time_window_s=float(min(TW_CAP_L_S, 2.2 * (D + 0.2) / v + 5e-9)),
+    scan_step = SCAN_STEP_L_M if large else 0.03; tw_cap = TW_CAP_L_S if large else 6.0e-8
+    meta.update(tier="L" if large else "M", scale="excavation" if large else "utility",
+                dx_m=dx, scan_step_m=scan_step, tw_cap_s=tw_cap,
+                time_window_s=float(min(tw_cap, 2.2 * (D + 0.2) / v + 5e-9)),
+                coupling=coupling, antenna="hertzian_dipole", tx_rx_offset_m=tx_rx_offset,
                 correlation_sampled=sampled, realistic_relation=realistic_relation)
     return sc, objs, meta
 
@@ -165,9 +201,10 @@ def run_composite_one(idx, seed, log, realistic_host_prob, realistic_relation_pr
         log(f"  WARN domain card: {type(e).__name__}: {str(e)[:120]}")
 
     if dry:
-        log(f"DRY {idx:02d} host={host:14s} rel={'R' if realistic_relation else 'D'} "
-            f"W={sc.width_m:4.1f} D={sc.soil_depth_m:3.1f} objs={len(objs):2d} traces={n_traces:3d} "
-            f"tw={tw_s*1e9:4.0f}ns covered={covered} comp={card_comp} rels={card_rels} | {meta['note']}")
+        log(f"DRY {idx:02d} {meta['scale']:10s} {meta['coupling']:14s} fc={meta['fc_hz']/1e6:.0f}MHz "
+            f"host={host:14s} rel={'R' if realistic_relation else 'D'} W={sc.width_m:4.1f} D={sc.soil_depth_m:3.1f} "
+            f"objs={len(objs):2d} traces={n_traces:3d} tw={tw_s*1e9:4.0f}ns covered={covered} "
+            f"comp={card_comp} rels={card_rels} | {meta['note']}")
         return None
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
@@ -175,7 +212,8 @@ def run_composite_one(idx, seed, log, realistic_host_prob, realistic_relation_pr
     out_dir.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     r = G.S.run_bscan(sc, out_dir=out_dir, fc_hz=meta["fc_hz"], n_traces=n_traces,
-                      scan_start_m=scan_start, scan_step_m=scan_step, time_window_s=tw_s, gpu=True)
+                      scan_start_m=scan_start, scan_step_m=scan_step, tx_rx_offset_m=meta["tx_rx_offset_m"],
+                      time_window_s=tw_s, gpu=True)
     dt_ns, dx_m, b = r["dt_ns"], r["dx_m"], r["bscan"]
     G._save_preview(out_dir / "bscan.png", b)
     try:
@@ -183,7 +221,9 @@ def run_composite_one(idx, seed, log, realistic_host_prob, realistic_relation_pr
     except Exception:
         pass
     labels = {
-        "scene_type": SCENE_TYPE, "tier": "L", "ambiguity": meta["ambiguity"], "note": meta["note"],
+        "scene_type": SCENE_TYPE, "tier": meta["tier"], "scale": meta["scale"], "coupling": meta["coupling"],
+        "antenna": meta["antenna"], "tx_rx_offset_m": meta["tx_rx_offset_m"],
+        "ambiguity": meta["ambiguity"], "note": meta["note"],
         "scene_composition": card_comp, "host_material": host, "host_eps_r": meta["host_eps_r"],
         "realistic_host_prob": realistic_host_prob, "realistic_relation": realistic_relation,
         "realistic_relation_prob": realistic_relation_prob,
@@ -203,7 +243,8 @@ def run_composite_one(idx, seed, log, realistic_host_prob, realistic_relation_pr
     G._clean_caches(out_dir)
     with (G.OUT_ROOT / "manifest.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps({"dir": str(out_dir.relative_to(G.OUT_ROOT)), "scene_type": SCENE_TYPE,
-                            "tier": "L", "ambiguity": meta["ambiguity"], "n_objects": len(objs),
+                            "tier": meta["tier"], "scale": meta["scale"], "coupling": meta["coupling"],
+                            "antenna": meta["antenna"], "ambiguity": meta["ambiguity"], "n_objects": len(objs),
                             "n_relations": card_rels, "scene_composition": card_comp, "host": host,
                             "realistic_relation": realistic_relation, "realistic_relation_prob": realistic_relation_prob,
                             "bscan_shape": list(b.shape), "wall_s": prov["wall_s"], "created_at": prov["created_at"]}) + "\n")
