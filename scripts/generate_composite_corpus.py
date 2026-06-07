@@ -43,27 +43,71 @@ DX_L_M = 0.01                  # 10 mm voxel (TU1208 scale)
 TW_CAP_L_S = 1.5e-7            # up to 150 ns (deep scene)
 
 
+GEO_STRATA = ("topsoil_moist", "loam", "wet_clay", "dry_sand", "gravel", "silt")
+PAVEMENT = (("asphalt", 0.06, 0.12), ("gravel", 0.15, 0.30), ("dry_sand", 0.15, 0.35))   # surface->down, over subgrade
+
+
+def _add_layers(sc, rng, kind, D, W):
+    """Add a horizontally LAYERED ground (pavement or geological strata) before any pit. Layers are
+    full-width; a later pit paints over them (cuts through). Returns (layer objs, note)."""
+    objs = []; names = []; z = 0.0
+    if kind == "pavement":
+        for mat, lo, hi in PAVEMENT:
+            th = float(rng.uniform(lo, hi))
+            if z + th > D - 0.5:
+                break
+            sc.add_layer(depth_top_m=z, thickness_m=th, material=mat)
+            objs.append(G._obj(f"{mat}_layer", mat, box={"x_min": 0.0, "x_max": round(W, 3),
+                                                         "depth_top": round(z, 3), "depth_bottom": round(z + th, 3)}))
+            names.append(mat); z += th
+        return objs, "pavement(" + "/".join(names) + ")"
+    strata = list(rng.choice(GEO_STRATA, size=int(rng.integers(2, 4)), replace=False))
+    for i, mat in enumerate(strata):
+        th = float(rng.uniform(0.3, max(0.4, (D - z) / max(len(strata) - i, 1))))
+        if i > 0 and z + th > D - 0.4:
+            break
+        sc.add_layer(depth_top_m=z, thickness_m=th, material=str(mat))
+        objs.append(G._obj(f"{mat}_stratum", str(mat), box={"x_min": 0.0, "x_max": round(W, 3),
+                                                            "depth_top": round(z, 3), "depth_bottom": round(z + th, 3)}))
+        names.append(str(mat)); z += th
+    return objs, "strata(" + "/".join(names) + ")"
+
+
 def build_composite_corridor(rng, host_soil=None, realistic_relation=True):
-    """A TU1208-class scene: a WIDE backfilled pit spanning most of the width, with utilities in
-    2-3 LAYERS inside it, and blocks/cavities in the surrounding host. Object presence + layered
-    arrangement come from object_correlation (strength-gated); the pit wall shape is host-correlated."""
-    soil = host_soil or str(rng.choice(G.SOILS))
-    # SCALE: size the canvas to the content -- a large excavation gets a large canvas; small utilities
-    # get a small one (no point imaging a 0.6 m trench across 18 m).
-    large = bool(rng.random() < 0.4)
-    if large:
-        W = float(rng.uniform(10.0, 18.0)); D = float(rng.uniform(3.0, 4.0)); dx = DX_L_M
-        pit_frac = float(rng.uniform(0.55, 0.80))
-    else:
-        W = float(rng.uniform(3.0, 6.0)); D = float(rng.uniform(1.6, 2.6)); dx = 0.006
-        pit_frac = float(rng.uniform(0.30, 0.60))
+    """A composite subsurface scene in one of four FAMILIES:
+      excavation -- a wide backfilled pit with utilities layered inside + host clutter.
+      tu1208     -- the IFSTTAR TU1208 object set: a trapezoidal limestone pit in rock, 3 pipe layers
+                    (steel / water-filled PVC / empty PVC), gneiss blocks, a polystyrene cavity.
+      geological -- horizontally layered soil strata cut by a utility trench + utilities.
+      pavement   -- an asphalt/base/subbase pavement cut by a utility trench + utilities.
+    Object presence + the layered-vs-scattered arrangement come from object_correlation (strength-gated);
+    pipe locations + counts vary per scene."""
+    family = str(rng.choice(["excavation", "tu1208", "geological", "pavement"], p=[0.45, 0.25, 0.18, 0.12]))
+    is_tu, is_pav, is_geo = family == "tu1208", family == "pavement", family == "geological"
+
+    if is_tu:                                                      # TU1208: rock host, large trapezoidal pit
+        soil = host_soil or str(rng.choice(["granite", "dry_limestone", "moist_limestone"]))
+        large = True; W = float(rng.uniform(12.0, 20.0)); D = float(rng.uniform(3.2, 4.2)); dx = DX_L_M
+        pit_frac = float(rng.uniform(0.6, 0.85))
+    elif is_pav:                                                  # pavement: shallow, over a sandy subgrade
+        soil = host_soil or "dry_sand"
+        large = False; W = float(rng.uniform(4.0, 8.0)); D = float(rng.uniform(1.6, 2.4)); dx = 0.006
+        pit_frac = float(rng.uniform(0.25, 0.5))
+    else:                                                          # excavation / geological -- scale-matched canvas
+        large = bool(rng.random() < 0.45)
+        soil = host_soil or str(rng.choice(G.SOILS))
+        if large:
+            W = float(rng.uniform(10.0, 18.0)); D = float(rng.uniform(3.0, 4.0)); dx = DX_L_M
+            pit_frac = float(rng.uniform(0.5, 0.78))
+        else:
+            W = float(rng.uniform(3.5, 6.5)); D = float(rng.uniform(1.8, 2.8)); dx = 0.006
+            pit_frac = float(rng.uniform(0.3, 0.6))
     sc = G.S.Scene(width_m=W, soil_depth_m=D, dx_m=dx, soil_material=soil)
     # COUPLING: the antenna sits in the air gap -> air_gap_m sets ground-coupled vs air-launched.
-    air_launched = bool(rng.random() < 0.3)
+    air_launched = bool(rng.random() < (0.6 if is_pav else 0.3))   # road surveys are often air-launched
     sc.air_gap_m = float(rng.uniform(0.25, 0.5)) if air_launched else float(rng.uniform(0.02, 0.06))
     coupling = "air_launched" if air_launched else "ground_coupled"
-    # ANTENNA: the 2-D corpus uses a hertzian dipole; vary fc by scale + the Tx-Rx offset. (The 3-D
-    # MALA antenna is a separate ~50-100x slower path -- temp_src/run_mala_3d.py -- not generated here.)
+    # ANTENNA: 2-D hertzian dipole; vary fc by scale + the Tx-Rx offset (3-D MALA is the separate path).
     fc = 2.5e8 if large else float(rng.choice([5.0e8, 8.0e8])); tx_rx_offset = round(float(rng.uniform(0.04, 0.18)), 3)
     objs: list[dict] = []
     notes: list[str] = []
@@ -73,12 +117,17 @@ def build_composite_corridor(rng, host_soil=None, realistic_relation=True):
         sampled.append({"anchor": anchor, "companion": companion,
                         "relation": relation.value, "arrangement": arr.value})
 
-    # --- wide backfilled excavation spanning most of the width; wall shape host-correlated ---
-    backfill = str(rng.choice(["dry_sand", "gravel", "silt", "moist_limestone"]))
+    # --- layered ground (host stratification), added FIRST so the pit cuts through it ---
+    if is_pav or is_geo:
+        lobjs, lnote = _add_layers(sc, rng, "pavement" if is_pav else "geological", D, W)
+        objs += lobjs; notes.append(lnote)
+
+    # --- backfilled pit / trench (cuts through any layers); shape host-correlated (tu1208 = trapezoid) ---
+    backfill = "moist_limestone" if is_tu else str(rng.choice(["dry_sand", "gravel", "silt", "moist_limestone"]))
     pit_w = pit_frac * W
     pit_cx = float(np.clip(W / 2 + rng.uniform(-0.08, 0.08) * W, pit_w / 2 + 0.3, W - pit_w / 2 - 0.3))
     pit_bot = float(rng.uniform(min(1.2, D - 0.6), D - 0.3)); htop = pit_w / 2
-    shape = correlated_shape_for("utility_trench", soil, rng, realistic=realistic_relation)   # OSHA/EC7
+    shape = "trapezoid" if is_tu else correlated_shape_for("utility_trench", soil, rng, realistic=realistic_relation)
     if shape == "box":
         hbot = htop
         sc.add_box(x_min_m=pit_cx - htop, x_max_m=pit_cx + htop, depth_top_m=0.0, depth_bottom_m=pit_bot,
@@ -96,65 +145,80 @@ def build_composite_corridor(rng, host_soil=None, realistic_relation=True):
     def _halfwidth_at(z):                                          # pit half-width at depth z (wall taper)
         return htop + (hbot - htop) * (z / pit_bot)
 
-    # --- utilities in 2-3 LAYERS inside the pit (trench->pipe co-occurrence; layered arrangement) ---
+    # --- utilities in LAYERS inside the pit; materials vary (tu1208 = steel / water-PVC / empty-PVC) ---
     comps = sample_companions("utility_trench", rng, realistic=realistic_relation)   # provenance + extras
-    if True:                                                  # the excavation is dug FOR utilities -> always present
-        rel0 = next((r for c, r, *_ in comps if c == "pipe"), ScenarioRelationType.SPATIAL_CONTAINED_IN)
-        n_layers = int(rng.integers(2, 4)) if large else int(rng.integers(1, 3))
-        layer_depths = [0.3 + (pit_bot - 0.45) * (li + 0.5) / n_layers for li in range(n_layers)]
-        duct_layer = int(rng.integers(0, n_layers)) if rng.random() < 0.5 else -1   # one layer may be a duct bank
-        for li, lz in enumerate(layer_depths):
-            hw = _halfwidth_at(lz) * 0.82
-            n_in = int(rng.integers(2, 5))
-            if li == duct_layer:                                  # a duct bank: concrete envelope + parallel conduits
-                bw = float(min(2 * hw, 0.18 * n_in + 0.1)); dcx = pit_cx + float(rng.uniform(-0.3, 0.3)) * hw
-                sc.add_box(x_min_m=dcx - bw / 2, x_max_m=dcx + bw / 2, depth_top_m=lz - 0.12, depth_bottom_m=lz + 0.12,
-                           material="concrete", name="duct_bank_envelope")
-                objs.append(G._obj("duct_bank_envelope", "concrete",
-                                   box={"x_min": dcx - bw / 2, "x_max": dcx + bw / 2, "depth_top": lz - 0.12, "depth_bottom": lz + 0.12}))
-                _record("duct_bank_envelope", "conduit", Arrangement.PARALLEL_BAND, Arrangement.PARALLEL_BAND)
-                cmat = str(rng.choice(["pvc", "air"]))
-                for j in range(n_in):
-                    ox = (dcx - bw / 2 + 0.05 + (bw - 0.1) * (j + 0.5) / n_in) if realistic_relation else (dcx + float(rng.uniform(-hw, hw)))
-                    sc.add_void(center_x_m=float(ox), depth_m=lz, radius_m=0.035, material=cmat)
-                    objs.append(G._obj("conduit", cmat, x=float(ox), depth=lz, radius=0.035))
-                notes.append(f"ductbank L{li}({n_in})")
-                continue
-            mat = str(rng.choice(["steel", "cast_iron", "pvc", "hdpe", "concrete"]))
-            for j in range(n_in):                                 # a parallel row of pipes (one layer)
-                if realistic_relation:
-                    px = pit_cx - hw + (2 * hw) * (j + 0.5) / n_in; pz = lz + float(rng.uniform(-0.05, 0.05))
-                else:                                             # decorrelated -> scattered depth/x within the pit
-                    px = pit_cx + float(rng.uniform(-hw, hw)); pz = float(rng.uniform(0.5, pit_bot - 0.15))
-                r = float(rng.uniform(0.04, 0.08))
-                sc.add_pipe(center_x_m=float(px), depth_m=float(pz), radius_m=r, material=mat)
-                objs.append(G._obj("pipe", mat, x=float(px), depth=float(pz), radius=r))
-                if mat in ("pvc", "hdpe", "concrete") and rng.random() < 0.5:    # empty pipe -> inner air
-                    sc.add_void(center_x_m=float(px), depth_m=float(pz), radius_m=r * 0.65, material="air")
-                    objs.append(G._obj("pipe_void", "air", x=float(px), depth=float(pz), radius=r * 0.65))
-        _record("utility_trench", "pipe", rel0, Arrangement.TRENCH_FLOOR if realistic_relation else Arrangement.SCATTER)
-        notes.append(f"{n_layers} pipe layers")
+    rel0 = next((r for c, r, *_ in comps if c == "pipe"), ScenarioRelationType.SPATIAL_CONTAINED_IN)
+    n_layers = 3 if is_tu else (int(rng.integers(2, 4)) if large else int(rng.integers(1, 3)))
+    layer_depths = [0.3 + (pit_bot - 0.45) * (li + 0.5) / n_layers for li in range(n_layers)]
+    tu_codes = ["steel", "water_pvc", "empty_pvc"]                 # TU1208 layer materials (Fig.9)
+    duct_layer = int(rng.integers(0, n_layers)) if (not is_tu and rng.random() < 0.45) else -1
+    for li, lz in enumerate(layer_depths):
+        hw = _halfwidth_at(lz) * 0.82
+        n_in = int(rng.integers(2, 5))                            # vary pipes-per-layer (locations + numbers)
+        if li == duct_layer:                                      # a duct bank: concrete envelope + parallel conduits
+            bw = float(min(2 * hw, 0.18 * n_in + 0.1)); dcx = pit_cx + float(rng.uniform(-0.3, 0.3)) * hw
+            sc.add_box(x_min_m=dcx - bw / 2, x_max_m=dcx + bw / 2, depth_top_m=lz - 0.12, depth_bottom_m=lz + 0.12,
+                       material="concrete", name="duct_bank_envelope")
+            objs.append(G._obj("duct_bank_envelope", "concrete",
+                               box={"x_min": dcx - bw / 2, "x_max": dcx + bw / 2, "depth_top": lz - 0.12, "depth_bottom": lz + 0.12}))
+            _record("duct_bank_envelope", "conduit", Arrangement.PARALLEL_BAND, Arrangement.PARALLEL_BAND)
+            cmat = str(rng.choice(["pvc", "air"]))
+            for j in range(n_in):
+                ox = (dcx - bw / 2 + 0.05 + (bw - 0.1) * (j + 0.5) / n_in) if realistic_relation else (dcx + float(rng.uniform(-hw, hw)))
+                sc.add_void(center_x_m=float(ox), depth_m=lz, radius_m=0.035, material=cmat)
+                objs.append(G._obj("conduit", cmat, x=float(ox), depth=lz, radius=0.035))
+            notes.append(f"ductbank L{li}({n_in})")
+            continue
+        code = tu_codes[li % 3] if is_tu else str(rng.choice(["steel", "cast_iron", "pvc", "hdpe", "concrete"]))
+        shell = "pvc" if code in ("water_pvc", "empty_pvc") else code
+        for j in range(n_in):                                     # a parallel row of pipes (one layer)
+            if realistic_relation:
+                px = pit_cx - hw + (2 * hw) * (j + 0.5) / n_in; pz = lz + float(rng.uniform(-0.05, 0.05))
+            else:                                                 # decorrelated -> scattered depth/x within the pit
+                px = pit_cx + float(rng.uniform(-hw, hw)); pz = float(rng.uniform(0.5, pit_bot - 0.15))
+            r = float(rng.uniform(0.04, 0.08))
+            sc.add_pipe(center_x_m=float(px), depth_m=float(pz), radius_m=r, material=shell)
+            objs.append(G._obj("pipe", shell, x=float(px), depth=float(pz), radius=r))
+            fill = ("water" if code == "water_pvc"                # water-filled / empty / random-empty plastic
+                    else "air" if (code == "empty_pvc" or (shell in ("pvc", "hdpe", "concrete") and rng.random() < 0.5))
+                    else None)
+            if fill:
+                sc.add_void(center_x_m=float(px), depth_m=float(pz), radius_m=r * 0.65, material=fill)
+                objs.append(G._obj("pipe_fill_water" if fill == "water" else "pipe_void", fill,
+                                   x=float(px), depth=float(pz), radius=r * 0.65))
+    _record("utility_trench", "pipe", rel0, Arrangement.TRENCH_FLOOR if realistic_relation else Arrangement.SCATTER)
+    notes.append(f"{n_layers} pipe layers" + (" [steel/water-PVC/empty-PVC]" if is_tu else ""))
 
-    # --- surrounding host clutter OUTSIDE the pit (gneiss blocks / cavities, TU1208-like) ---
-    for _ in range(int(rng.integers(1, 4)) if large else int(rng.integers(0, 2))):
+    # --- a polystyrene cavity (always for TU1208; occasional elsewhere) ---
+    if is_tu or rng.random() < 0.35:
+        cav_x = float(np.clip(pit_cx + float(rng.uniform(-0.5, 0.5)) * htop, 0.6, W - 0.6))
+        cav_z = float(rng.uniform(0.6, max(0.8, pit_bot - 0.2))); cav_r = float(rng.uniform(0.12, 0.25))
+        sc.add_void(center_x_m=cav_x, depth_m=cav_z, radius_m=cav_r, material="air")   # polystyrene ~ air (eps~1.05)
+        objs.append(G._obj("polystyrene_cavity" if is_tu else "generic_void", "air",
+                           x=cav_x, depth=cav_z, radius=cav_r, ambiguity=True))
+        notes.append("cavity")
+
+    # --- surrounding host clutter OUTSIDE the pit (TU1208 gneiss blocks ~ granite) ---
+    n_clut = int(rng.integers(2, 5)) if is_tu else (int(rng.integers(1, 4)) if large else int(rng.integers(0, 2)))
+    for _ in range(n_clut):
         spans = [s for s in ((0.6, pit_cx - htop - 0.6), (pit_cx + htop + 0.6, W - 0.6)) if s[1] - s[0] > 0.5]
         if not spans:
             break
         s = spans[int(rng.integers(0, len(spans)))]
         x = float(rng.uniform(*s)); z = float(rng.uniform(0.5, D - 0.5))
-        if rng.random() < 0.6:
-            rock = str(rng.choice(["granite", "limestone"])); rr = float(rng.uniform(0.08, 0.18))
+        if is_tu or rng.random() < 0.6:
+            rock = "granite" if is_tu else str(rng.choice(["granite", "limestone"])); rr = float(rng.uniform(0.08, 0.18))
             sc.add_pipe(center_x_m=x, depth_m=z, radius_m=rr, material=rock)
-            objs.append(G._obj("boulder", rock, x=x, depth=z, radius=rr, ambiguity=True))
+            objs.append(G._obj("gneiss_block" if is_tu else "boulder", rock, x=x, depth=z, radius=rr, ambiguity=True))
         else:
             rr = float(rng.uniform(0.1, 0.22))
             sc.add_void(center_x_m=x, depth_m=z, radius_m=rr, material="air")
             objs.append(G._obj("generic_void", "air", x=x, depth=z, radius=rr, ambiguity=True))
 
-    meta = G._meta(SCENE_TYPE, soil, D, fc=fc, n_traces=0, note="corridor: " + ", ".join(notes))
+    meta = G._meta(SCENE_TYPE, soil, D, fc=fc, n_traces=0, note=f"{family}: " + ", ".join(notes))
     v = 3e8 / math.sqrt(max(G._eps(soil), 1.0))
     scan_step = SCAN_STEP_L_M if large else 0.03; tw_cap = TW_CAP_L_S if large else 6.0e-8
-    meta.update(tier="L" if large else "M", scale="excavation" if large else "utility",
+    meta.update(tier="L" if large else "M", scale="excavation" if large else "utility", family=family,
                 dx_m=dx, scan_step_m=scan_step, tw_cap_s=tw_cap,
                 time_window_s=float(min(tw_cap, 2.2 * (D + 0.2) / v + 5e-9)),
                 coupling=coupling, antenna="hertzian_dipole", tx_rx_offset_m=tx_rx_offset,
@@ -191,6 +255,13 @@ def run_composite_one(idx, seed, log, realistic_host_prob, realistic_relation_pr
     host = str(host_rng.choice(G.SOILS))                       # composite is host-agnostic
     realistic_relation = bool(host_rng.random() < realistic_relation_prob)
     sc, objs, meta = build_composite_corridor(rng, host_soil=host, realistic_relation=realistic_relation)
+    # Drop pipe-only scenes: every scene must have non-pipe STRUCTURE (a pit, layers, duct, cavity, or
+    # block) -- a bare field of pipes is not a useful composite sample.
+    _ctx = {"pipe_void", "pipe_fill_water", "trench_backfill"}
+    targets = {o["kind"] for o in objs if o["kind"] not in _ctx and not o["kind"].endswith(("_layer", "_stratum"))}
+    if targets <= {"pipe"}:
+        log(f"  SKIP idx={idx}: pipe-only scene (no non-pipe structure)")
+        return None
     sc.soil_material = host; meta["host_material"] = host; meta["host_eps_r"] = round(G._eps(host), 3)
     het = {"eps_spread_frac": 0.10, "correlation_length_m": float(rng.uniform(0.1, 0.25)), "n_levels": 9, "seed": seed}
     sc.soil_heterogeneity = het
