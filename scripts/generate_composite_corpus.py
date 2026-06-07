@@ -61,16 +61,70 @@ def _add_layers(sc, rng, kind, D, W):
                                                          "depth_top": round(z, 3), "depth_bottom": round(z + th, 3)}))
             names.append(mat); z += th
         return objs, "pavement(" + "/".join(names) + ")"
-    strata = list(rng.choice(GEO_STRATA, size=int(rng.integers(2, 4)), replace=False))
-    for i, mat in enumerate(strata):
-        th = float(rng.uniform(0.3, max(0.4, (D - z) / max(len(strata) - i, 1))))
-        if i > 0 and z + th > D - 0.4:
-            break
-        sc.add_layer(depth_top_m=z, thickness_m=th, material=str(mat))
-        objs.append(G._obj(f"{mat}_stratum", str(mat), box={"x_min": 0.0, "x_max": round(W, 3),
-                                                            "depth_top": round(z, 3), "depth_bottom": round(z + th, 3)}))
-        names.append(str(mat)); z += th
-    return objs, "strata(" + "/".join(names) + ")"
+    # geological strata are NOT flat: build each as a polygon band whose top/bottom interfaces follow a
+    # shared low-frequency wave + an overall dip (the air-ground surface stays flat).
+    strata = list(rng.choice(GEO_STRATA, size=int(rng.integers(3, 5)), replace=False))
+    n = len(strata); nx = 28; xs = np.linspace(0.0, W, nx)
+    dip = float(rng.uniform(-0.12, 0.12)); amp = float(rng.uniform(0.08, 0.22))
+    f1, f2 = float(rng.uniform(0.6, 1.6)), float(rng.uniform(1.6, 3.2))
+    ph1, ph2 = float(rng.uniform(0, 2 * np.pi)), float(rng.uniform(0, 2 * np.pi))
+    wave = (amp * (0.7 * np.sin(2 * np.pi * f1 * xs / W + ph1) + 0.3 * np.sin(2 * np.pi * f2 * xs / W + ph2))
+            + dip * D * (xs / W - 0.5))
+    base = [0.0]
+    for i in range(n):
+        th = float(rng.uniform(0.35, max(0.5, (D - z) / max(n - i, 1)))); z = min(z + th, D - 0.2); base.append(z)
+    iface = [np.zeros(nx)] + [np.clip(base[i] + wave * float(rng.uniform(0.6, 1.1)), 0.05, D) for i in range(1, n + 1)]
+    for i in range(1, n + 1):                                  # keep interfaces from crossing
+        iface[i] = np.maximum(iface[i], iface[i - 1] + 0.05)
+    for i in range(n):
+        top, bot = iface[i], iface[i + 1]
+        poly = ([(float(xs[j]), float(top[j])) for j in range(nx)]
+                + [(float(xs[nx - 1 - j]), float(bot[nx - 1 - j])) for j in range(nx)])
+        sc.add_polygon(corners_xz=poly, material=str(strata[i]), name=f"{strata[i]}_stratum")
+        objs.append(G._obj(f"{strata[i]}_stratum", str(strata[i]),
+                           box={"x_min": 0.0, "x_max": round(W, 3),
+                                "depth_top": round(float(top.mean()), 3), "depth_bottom": round(float(bot.mean()), 3)}))
+        names.append(str(strata[i]))
+    return objs, "strata~(" + "/".join(names) + ")"
+
+
+def _add_cavity(sc, rng, objs, cx, cz, r, material, kind, *, shape=None):
+    """Add a cavity/void with a varied SHAPE (consumes the placement-grammar polygon path):
+      circle  -- simple air pocket / pipe void
+      ellipse -- a flattened lens / perched air pocket
+      dome    -- an arched roof over a flat floor (the TU1208 polystyrene; a collapse/tunnel crown)
+      rect    -- a buried box: utility vault, culvert, chamber, basement
+      chimney -- a raveling sinkhole void (narrow neck, bulbous body; either orientation)
+      blob    -- an irregular karst dissolution void
+    """
+    shape = shape or str(rng.choice(["circle", "ellipse", "dome", "rect", "chimney", "blob", "blob"]))
+    poly = None; eff = r
+    if shape == "circle":
+        sc.add_void(center_x_m=cx, depth_m=cz, radius_m=r, material=material)
+    elif shape == "ellipse":
+        a = r * float(rng.uniform(1.1, 1.9)); b = r * float(rng.uniform(0.45, 0.85)); rot = float(rng.uniform(0, np.pi))
+        t = np.linspace(0, 2 * np.pi, 20, endpoint=False); ex, ey = a * np.cos(t), b * np.sin(t)
+        poly = [(cx + ex[i] * np.cos(rot) - ey[i] * np.sin(rot), cz + ex[i] * np.sin(rot) + ey[i] * np.cos(rot)) for i in range(len(t))]
+        eff = a
+    elif shape == "dome":                                     # arched roof, flat floor (TU1208 polystyrene)
+        w = r * float(rng.uniform(1.0, 1.6)); h = r * float(rng.uniform(0.9, 1.5)); zf = cz + h / 2
+        t = np.linspace(0.0, np.pi, 16)
+        poly = [(cx - w, zf), (cx + w, zf)] + [(cx + w * np.cos(tt), zf - h * np.sin(tt)) for tt in t]; eff = max(w, h)
+    elif shape == "rect":                                     # buried box / vault / culvert
+        w = r * float(rng.uniform(1.3, 2.4)); h = r * float(rng.uniform(0.6, 1.5))
+        poly = [(cx - w / 2, cz - h / 2), (cx + w / 2, cz - h / 2), (cx + w / 2, cz + h / 2), (cx - w / 2, cz + h / 2)]; eff = max(w, h) / 2
+    elif shape == "chimney":                                  # raveling sinkhole: narrow neck + bulb
+        wt = r * float(rng.uniform(0.3, 0.6)); wb = r * float(rng.uniform(1.0, 1.6)); h = r * float(rng.uniform(1.3, 2.2))
+        if rng.random() < 0.5:
+            wt, wb = wb, wt
+        poly = [(cx - wt, cz - h / 2), (cx + wt, cz - h / 2), (cx + wb, cz + h / 2), (cx - wb, cz + h / 2)]; eff = max(wb, h / 2)
+    else:                                                     # irregular karst blob
+        m = int(rng.integers(7, 12)); ang = np.sort(rng.uniform(0, 2 * np.pi, m)); rr = r * (1 + rng.uniform(-0.4, 0.6, m))
+        poly = [(cx + rr[i] * np.cos(ang[i]), cz + rr[i] * np.sin(ang[i])) for i in range(m)]; eff = float(rr.max())
+    if poly is not None:
+        poly = [(float(px), float(max(0.05, pz))) for px, pz in poly]
+        sc.add_polygon(corners_xz=poly, material=material, name=kind)
+    objs.append(G._obj(kind, material, x=cx, depth=cz, radius=float(eff), polygon=poly, ambiguity=True))
 
 
 def build_composite_corridor(rng, host_soil=None, realistic_relation=True):
@@ -193,9 +247,9 @@ def build_composite_corridor(rng, host_soil=None, realistic_relation=True):
     if is_tu or rng.random() < 0.35:
         cav_x = float(np.clip(pit_cx + float(rng.uniform(-0.5, 0.5)) * htop, 0.6, W - 0.6))
         cav_z = float(rng.uniform(0.6, max(0.8, pit_bot - 0.2))); cav_r = float(rng.uniform(0.12, 0.25))
-        sc.add_void(center_x_m=cav_x, depth_m=cav_z, radius_m=cav_r, material="air")   # polystyrene ~ air (eps~1.05)
-        objs.append(G._obj("polystyrene_cavity" if is_tu else "generic_void", "air",
-                           x=cav_x, depth=cav_z, radius=cav_r, ambiguity=True))
+        # TU1208 polystyrene is a DOME; elsewhere pick any cavity shape. air ~ polystyrene (eps~1.05).
+        _add_cavity(sc, rng, objs, cav_x, cav_z, cav_r, "air",
+                    "polystyrene_cavity" if is_tu else "generic_void", shape="dome" if is_tu else None)
         notes.append("cavity")
 
     # --- surrounding host clutter OUTSIDE the pit (TU1208 gneiss blocks ~ granite) ---
@@ -211,9 +265,7 @@ def build_composite_corridor(rng, host_soil=None, realistic_relation=True):
             sc.add_pipe(center_x_m=x, depth_m=z, radius_m=rr, material=rock)
             objs.append(G._obj("gneiss_block" if is_tu else "boulder", rock, x=x, depth=z, radius=rr, ambiguity=True))
         else:
-            rr = float(rng.uniform(0.1, 0.22))
-            sc.add_void(center_x_m=x, depth_m=z, radius_m=rr, material="air")
-            objs.append(G._obj("generic_void", "air", x=x, depth=z, radius=rr, ambiguity=True))
+            _add_cavity(sc, rng, objs, x, z, float(rng.uniform(0.1, 0.22)), "air", "generic_void")
 
     meta = G._meta(SCENE_TYPE, soil, D, fc=fc, n_traces=0, note=f"{family}: " + ", ".join(notes))
     v = 3e8 / math.sqrt(max(G._eps(soil), 1.0))
