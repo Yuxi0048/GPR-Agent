@@ -162,7 +162,30 @@ def build_composite_corridor(rng, host_soil=None, realistic_relation=True):
     return sc, objs, meta
 
 
-def run_composite_one(idx, seed, log, realistic_host_prob, realistic_relation_prob, *, dry=False):
+def _render_model_png(out_dir, meta, host):
+    """Render the VOXELIZED eps_r model (what gprMax sees) from geometry.h5 + materials.txt."""
+    import h5py
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    eps = np.array([float(l.split()[1]) for l in open(out_dir / "materials.txt") if l.startswith("#material")])
+    with h5py.File(out_dir / "geometry.h5", "r") as h:
+        g = np.asarray(h["data"])[:, :, 0]; dx = float(h.attrs["dx_dy_dz"][0])
+    gd = g[:, ::-1]                                            # flip y so row 0 = top of the domain
+    js = next((j for j in range(gd.shape[1]) if (gd == 0).mean(0)[j] < 0.5), 0)   # first sub-surface row
+    sub = eps[gd][:, js:]; Wm = sub.shape[0] * dx; Zm = sub.shape[1] * dx
+    fig, ax = plt.subplots(figsize=(12, 3.4), dpi=120)
+    im = ax.imshow(sub.T, origin="upper", aspect="auto", extent=[0, Wm, Zm, 0], cmap="turbo",
+                   vmin=float(np.percentile(sub, 1)), vmax=float(np.percentile(sub, 99)))
+    plt.colorbar(im, ax=ax, label="eps_r", fraction=0.03, pad=0.02)
+    ax.set_title(f"{meta['scale']} | {meta['coupling']} | fc={meta['fc_hz']/1e6:.0f}MHz | host {host} "
+                 f"(eps_r {meta['host_eps_r']}) | rel={'R' if meta['realistic_relation'] else 'D'} | {meta['note']}",
+                 fontsize=8)
+    ax.set_xlabel("x (m)"); ax.set_ylabel("depth (m)")
+    fig.tight_layout(); fig.savefig(out_dir / "model.png"); plt.close(fig)
+
+
+def run_composite_one(idx, seed, log, realistic_host_prob, realistic_relation_prob, *, dry=False, model_only=False):
     rng = np.random.default_rng(seed)
     host_rng = np.random.default_rng([seed, 0x484F5354])
     host = str(host_rng.choice(G.SOILS))                       # composite is host-agnostic
@@ -206,6 +229,29 @@ def run_composite_one(idx, seed, log, realistic_host_prob, realistic_relation_pr
             f"objs={len(objs):2d} traces={n_traces:3d} tw={tw_s*1e9:4.0f}ns covered={covered} "
             f"comp={card_comp} rels={card_rels} | {meta['note']}")
         return None
+
+    if model_only:                                            # voxelize + render the model, NO gprMax solve
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        out_dir = G.OUT_ROOT / SCENE_TYPE / f"composite_{ts}_{idx:05d}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        sc.write_gprmax(out_dir)                               # build123d -> OCP voxelize -> geometry.h5 + materials.txt
+        _render_model_png(out_dir, meta, host)
+        try:
+            (out_dir / "card.json").write_text(card.to_json(), encoding="utf-8")
+        except Exception:
+            pass
+        (out_dir / "labels.json").write_text(json.dumps({
+            "scene_type": SCENE_TYPE, "tier": meta["tier"], "scale": meta["scale"], "coupling": meta["coupling"],
+            "antenna": meta["antenna"], "host_material": host, "host_eps_r": meta["host_eps_r"],
+            "scene_composition": card_comp, "realistic_relation": realistic_relation,
+            "correlation_sampled": meta["correlation_sampled"], "objects": objs, "note": meta["note"],
+            "acquisition": {"fc_hz": meta["fc_hz"], "n_traces": n_traces, "scan_step_m": round(scan_step, 5),
+                            "time_window_s": meta["time_window_s"], "scene_width_m": sc.width_m, "model_only": True},
+        }, indent=2), encoding="utf-8")
+        log(f"MODEL {idx:02d} {meta['scale']:10s} {meta['coupling']:14s} fc={meta['fc_hz']/1e6:.0f}MHz "
+            f"host={host:14s} rel={'R' if realistic_relation else 'D'} W={sc.width_m:.1f} D={sc.soil_depth_m:.1f} "
+            f"objs={len(objs)} -> {out_dir.name}")
+        return out_dir
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     out_dir = G.OUT_ROOT / SCENE_TYPE / f"composite_{ts}_{idx:05d}"
@@ -259,6 +305,7 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--hours", type=float, default=9.0)
     ap.add_argument("--dry", action="store_true", help="build + validate scenes, no gprMax")
+    ap.add_argument("--model-only", action="store_true", help="voxelize + render the eps model, no gprMax solve")
     ap.add_argument("--realistic-host-prob", type=float, default=1.0)
     ap.add_argument("--realistic-relation-prob", type=float, required=True,
                     help="prob in [0,1] that object<->object presence+arrangement is physical; else decorrelated")
@@ -281,7 +328,8 @@ def main():
             break
         seed = int(rng.integers(0, 2**31 - 1))
         try:
-            run_composite_one(idx, seed, log, a.realistic_host_prob, a.realistic_relation_prob, dry=a.dry)
+            run_composite_one(idx, seed, log, a.realistic_host_prob, a.realistic_relation_prob,
+                               dry=a.dry, model_only=a.model_only)
             ok += 1
         except Exception as e:
             fail += 1
