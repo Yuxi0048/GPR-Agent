@@ -121,10 +121,17 @@ def _add_cavity(sc, rng, objs, cx, cz, r, material, kind, *, shape=None):
     else:                                                     # irregular karst blob
         m = int(rng.integers(7, 12)); ang = np.sort(rng.uniform(0, 2 * np.pi, m)); rr = r * (1 + rng.uniform(-0.4, 0.6, m))
         poly = [(cx + rr[i] * np.cos(ang[i]), cz + rr[i] * np.sin(ang[i])) for i in range(m)]; eff = float(rr.max())
+    # cavity TYPE is semantically tied to its shape -- record both so cavities are separable by type.
+    shape_type = {"circle": "air_pocket", "ellipse": "air_lens", "dome": "dome_void",
+                  "rect": "utility_vault", "chimney": "sinkhole_void", "blob": "karst_void"}
+    ctype = shape_type[shape]
+    label = kind if (kind and kind != "generic_void") else ctype     # keep forced kinds (e.g. polystyrene_cavity)
     if poly is not None:
         poly = [(float(px), float(max(0.05, pz))) for px, pz in poly]
-        sc.add_polygon(corners_xz=poly, material=material, name=kind)
-    objs.append(G._obj(kind, material, x=cx, depth=cz, radius=float(eff), polygon=poly, ambiguity=True))
+        sc.add_polygon(corners_xz=poly, material=material, name=label)
+    o = G._obj(label, material, x=cx, depth=cz, radius=float(eff), polygon=poly, ambiguity=True)
+    o["shape"] = shape; o["cavity_type"] = ctype
+    objs.append(o)
 
 
 def build_composite_corridor(rng, host_soil=None, realistic_relation=True):
@@ -231,11 +238,16 @@ def build_composite_corridor(rng, host_soil=None, realistic_relation=True):
             else:                                                 # decorrelated -> scattered depth/x within the pit
                 px = pit_cx + float(rng.uniform(-hw, hw)); pz = float(rng.uniform(0.5, pit_bot - 0.15))
             r = float(rng.uniform(0.04, 0.08))
-            sc.add_pipe(center_x_m=float(px), depth_m=float(pz), radius_m=r, material=shell)
-            objs.append(G._obj("pipe", shell, x=float(px), depth=float(pz), radius=r))
             fill = ("water" if code == "water_pvc"                # water-filled / empty / random-empty plastic
                     else "air" if (code == "empty_pvc" or (shell in ("pvc", "hdpe", "concrete") and rng.random() < 0.5))
                     else None)
+            ptype = ("metal" if shell in ("steel", "cast_iron") else "concrete" if shell == "concrete"
+                     else "water_filled_plastic" if fill == "water" else "empty_plastic" if fill == "air"
+                     else "solid_plastic")
+            sc.add_pipe(center_x_m=float(px), depth_m=float(pz), radius_m=r, material=shell)
+            po = G._obj("pipe", shell, x=float(px), depth=float(pz), radius=r)
+            po["ptype"] = ptype; po["fill"] = fill or "none"      # explicit pipe TYPE + fill (separable)
+            objs.append(po)
             if fill:
                 sc.add_void(center_x_m=float(px), depth_m=float(pz), radius_m=r * 0.65, material=fill)
                 objs.append(G._obj("pipe_fill_water" if fill == "water" else "pipe_void", fill,
