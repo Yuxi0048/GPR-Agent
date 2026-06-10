@@ -15,16 +15,12 @@ dependencies = [
   "numpy>=1.26",
   "scipy>=1.10",
   "pydantic>=2.7",
-  # Platform libraries (resolved via editable installs or the GPR_TOOLS_SRC /
-  # PYTHONPATH path-shims until pinned/published — same convention as GPR-Bench):
-  #   gpr-data-processing  (GPR-Tools, L1)  — perception engine
-  #   gpr-kb               (GPR-KB,   L0)   — reference library (materials/taxonomy)
-  #   gpr-bench            (GPR-Bench, L2)  — scoring the case vs ground truth
-  #   gpr-reasoning        (GPR-Interpretation) — the reasoning data model (evidence/hypothesis/case)
-  # "gpr-data-processing>=0.1",
-  # "gpr-kb>=0.1",
-  # "gpr-bench>=0.1",
-  # "gpr-reasoning>=0.1",
+  # Platform libraries — real dependencies (installed editable for dev via `make setup`,
+  # or pinned to release tags for product). The GPR_TOOLS_SRC / PYTHONPATH path-shims are gone.
+  "gpr-data-processing>=0.1",   # GPR-Tools  (L1) — perception engine
+  "gpr-kb>=0.1",                # GPR-KB     (L0) — reference library (materials/taxonomy)
+  "gpr-bench>=0.1",             # GPR-Bench  (L2) — scoring the case vs ground truth
+  "gpr-reasoning>=0.1",         # GPR-Interpretation (L0) — reasoning data model (evidence/hypothesis/case)
 ]
 
 [project.optional-dependencies]

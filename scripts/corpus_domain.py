@@ -10,9 +10,16 @@ See docs/civil-host-and-standards-data-model.md (Phase 4).
 """
 from __future__ import annotations
 
+import importlib.util
 import sys
+from pathlib import Path
 
-sys.path[:0] = [r"e:/github/GPR-Sim/src", r"e:/github/GPR-KnowledgeBase", r"e:/github/GPR-Tools/src"]
+# Dev fallback only: if the platform isn't installed (no `make setup`/editable installs), add the
+# sibling repo source roots RELATIVE to this checkout -- no hardcoded drive paths.
+if importlib.util.find_spec("subsurface_platform") is None:
+    _ROOT = Path(__file__).resolve().parents[2]   # repos root holding GPR-Sim, GPR-Tools, ...
+    sys.path[:0] = [str(_ROOT / "GPR-Sim" / "src"), str(_ROOT / "GPR-KnowledgeBase"),
+                    str(_ROOT / "GPR-Tools" / "src")]
 
 from subsurface_platform.domain import (                       # noqa: E402
     Horizon,

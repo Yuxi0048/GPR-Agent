@@ -19,6 +19,7 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import sys
@@ -29,9 +30,14 @@ from pathlib import Path
 import numpy as np
 
 _HERE = Path(__file__).resolve().parent
-sys.path[:0] = [str(_HERE), r"e:/github/GPR-Agent/src", r"e:/github/GPR-Sim/src",
-                r"e:/github/GPR-KnowledgeBase", r"e:/github/GPR-Tools/src",
-                r"e:/github/GPR-Interpretation/src"]   # gpr_reasoning (pulled in by import gpr_agent)
+sys.path.insert(0, str(_HERE))   # sibling scripts (generate_subsurface_corpus, corpus_domain)
+# Dev fallback only: if the platform isn't installed (no `make setup`/editable installs), add the
+# sibling repo source roots RELATIVE to this checkout -- no hardcoded drive paths.
+if importlib.util.find_spec("gpr_agent") is None:
+    _ROOT = _HERE.parents[1]   # repos root holding GPR-Agent, GPR-Sim, GPR-Tools, ...
+    sys.path[:0] = [str(_ROOT / "GPR-Agent" / "src"), str(_ROOT / "GPR-Sim" / "src"),
+                    str(_ROOT / "GPR-KnowledgeBase"), str(_ROOT / "GPR-Tools" / "src"),
+                    str(_ROOT / "GPR-Interpretation" / "src")]  # gpr_reasoning (via gpr_agent)
 
 import gpr_agent.sim_scenes as S
 from generate_subsurface_corpus import BUILDERS, _eps, _is_conductor, _obj  # Tier-T templates
