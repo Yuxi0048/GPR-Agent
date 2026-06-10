@@ -37,7 +37,7 @@ deterministic sandbox harness** (great for testing the tool loop without an API)
    the split repos. Same for any other legacy-only `gpr_data_processing` pieces.
 4. **Home (decision):** this is a coherent ~11 k-line subsystem with its own
    contracts + tests + public surface — large and distinct enough to justify
-   **its own repo (`GPR-Agent` / `GPR-Interpretation`, an L2/L3 app on top of
+   **its own repo (`GPR-Agent` / `GPR-Reasoning`, an L2/L3 app on top of
    GPR-Tools)** — *or* it lives in the Workbench as the interpretation app
    (`apps/agent`). Unlike the active-learning scripts, this one is repo-worthy.
 

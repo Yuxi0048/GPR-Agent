@@ -8,7 +8,7 @@ design** (this is what structurally blocks circular reasoning):
 
 The **reasoning** types (`Domain`, `Region`, `ToolCall`, `Provenance`, `Detection`,
 `DomainEvidence`, `Query`, `HypothesisStatus`, `Hypothesis`, `InterpretationCase`) now live in the
-`gpr_reasoning` library (GPR-Interpretation) and are **re-exported here for back-compat**; the
+`gpr_reasoning` library (GPR-Reasoning) and are **re-exported here for back-compat**; the
 **imaging / orchestration** contracts (`ImageRef`, `ImagingResult`, `Task`) stay agent-local.
 Dependency direction: GPR-Agent → `gpr_reasoning` (reasoning is a foundation, never the reverse).
 
@@ -20,7 +20,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-# Reasoning model (single source: gpr_reasoning, GPR-Interpretation) — re-exported for back-compat.
+# Reasoning model (single source: gpr_reasoning, GPR-Reasoning) — re-exported for back-compat.
 from gpr_reasoning import (
     Detection,
     Domain,

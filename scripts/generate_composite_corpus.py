@@ -14,7 +14,7 @@ At p<1 the corresponding correlation is broken (off-distribution), tagged in the
 detector cannot exploit "a trench usually contains a pipe" / "a duct bank's conduits are parallel".
 
 Run (PYTHONPATH = GPR-Agent/src;GPR-Agent/scripts;GPR-Sim/src;GPR-KnowledgeBase;GPR-Tools/src;
-GPR-Interpretation/src; CUDA v12.8 bin on PATH for the GPU):
+GPR-Reasoning/src; CUDA v12.8 bin on PATH for the GPU):
     python scripts/generate_composite_corpus.py --n 40 --seed 7 \
         --realistic-host-prob 1.0 --realistic-relation-prob 0.7
     python scripts/generate_composite_corpus.py --dry --n 5 ...      # build only, no gprMax

@@ -20,7 +20,7 @@ dependencies = [
   "gpr-data-processing>=0.1",   # GPR-Tools  (L1) — perception engine
   "gpr-kb>=0.1",                # GPR-KB     (L0) — reference library (materials/taxonomy)
   "gpr-bench>=0.1",             # GPR-Bench  (L2) — scoring the case vs ground truth
-  "gpr-reasoning>=0.1",         # GPR-Interpretation (L0) — reasoning data model (evidence/hypothesis/case)
+  "gpr-reasoning>=0.1",         # GPR-Reasoning (L0) — reasoning data model (evidence/hypothesis/case)
 ]
 
 [project.optional-dependencies]

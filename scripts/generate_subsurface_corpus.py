@@ -15,8 +15,8 @@ Scene types (from the subsurface_model_corpus):
 
 Run:
     python scripts/generate_subsurface_corpus.py [--hours 9] [--max 400] [--seed 0]
-needs PYTHONPATH = GPR-Agent/src;GPR-Sim/src;GPR-KnowledgeBase;GPR-Tools/src;GPR-Interpretation/src
-  (GPR-Interpretation/src provides gpr_reasoning, pulled in by `import gpr_agent`)
+needs PYTHONPATH = GPR-Agent/src;GPR-Sim/src;GPR-KnowledgeBase;GPR-Tools/src;GPR-Reasoning/src
+  (GPR-Reasoning/src provides gpr_reasoning, pulled in by `import gpr_agent`)
 """
 from __future__ import annotations
 

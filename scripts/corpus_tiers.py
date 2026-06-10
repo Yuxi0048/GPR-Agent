@@ -37,7 +37,7 @@ if importlib.util.find_spec("gpr_agent") is None:
     _ROOT = _HERE.parents[1]   # repos root holding GPR-Agent, GPR-Sim, GPR-Tools, ...
     sys.path[:0] = [str(_ROOT / "GPR-Agent" / "src"), str(_ROOT / "GPR-Sim" / "src"),
                     str(_ROOT / "GPR-KnowledgeBase"), str(_ROOT / "GPR-Tools" / "src"),
-                    str(_ROOT / "GPR-Interpretation" / "src")]  # gpr_reasoning (via gpr_agent)
+                    str(_ROOT / "GPR-Reasoning" / "src")]  # gpr_reasoning (via gpr_agent)
 
 import gpr_agent.sim_scenes as S
 from generate_subsurface_corpus import BUILDERS, _eps, _is_conductor, _obj  # Tier-T templates
